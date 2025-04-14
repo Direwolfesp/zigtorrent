@@ -9,13 +9,28 @@ const ParseError = error{
 const Value = union(enum) {
     string: []const u8,
     integer: i64,
+    list: ?std.ArrayList(Value),
 
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
         switch (self) {
             .string => |str| try writer.print("\"{s}\"\n", .{str}),
             .integer => |int| try writer.print("{}\n", .{int}),
+            .list => |list_opt| {
+                if (list_opt) |list| {
+                    try writer.print("[", .{});
+                    for (list.items) |elem| try elem.format(fmt, options, writer);
+                    try writer.print("]", .{});
+                }
+            },
+        }
+    }
+
+    pub fn deinit(self: *Value) void {
+        switch (self.*) {
+            .list => |*list_ptr| {
+                if (list_ptr.*) |*list| list.deinit();
+            },
+            else => {},
         }
     }
 };
@@ -46,8 +61,9 @@ pub fn main() !void {
 fn decodeBencode(encodedValue: []const u8) !Value {
     // Strings
     if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
+        const strlen: u32 = try std.fmt.parseInt(u32, encodedValue[0..1], 10);
         if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
-            return .{ .string = encodedValue[firstColon + 1 ..] };
+            return .{ .string = encodedValue[firstColon + 1 .. (firstColon + 1 + strlen)] };
         } else return ParseError.InvalidArgument;
     }
     // Integers
@@ -59,10 +75,39 @@ fn decodeBencode(encodedValue: []const u8) !Value {
             return ParseError.InvalidArgument;
         }
     }
-    // TODO
-    else {
-        try stdout.print("Only strings and integers are supported for the moment", .{});
+    // Lists
+    else if (encodedValue[0] == 'l') {
+        var decodedList = std.ArrayList(Value).init(allocator);
+        errdefer decodedList.deinit();
+
+        var i: usize = 1;
+        while (i < encodedValue.len) {
+            if (encodedValue[i] == 'e') {
+                break;
+            }
+            const res = try decodeBencode(encodedValue[i..]);
+            try decodedList.append(res);
+
+            switch (res) {
+                .integer => |int| {
+                    var digits: usize = 0;
+                    var num: i64 = int;
+                    while (num != 0) {
+                        digits += 1;
+                        num = @divFloor(num, 10);
+                    }
+                    i += (digits + 2);
+                },
+                .string => |str| {
+                    i += str.len + 1 + std.fmt.count("{}", .{str.len});
+                },
+                .list => i += 1,
+            }
+        }
+
+        return .{ .list = decodedList };
+    } else {
+        try stdout.print("Only Strings, Integers and Lists are available at this moment\n", .{});
         std.process.exit(1);
-        unreachable;
     }
 }
