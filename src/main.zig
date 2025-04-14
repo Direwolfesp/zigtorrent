@@ -31,14 +31,23 @@ pub fn main() !void {
 }
 
 fn decodeBencode(encodedValue: []const u8) !*const []const u8 {
+    // Strings
     if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
-        const firstColon = std.mem.indexOf(u8, encodedValue, ":");
-        if (firstColon == null) {
-            return error.InvalidArgument;
+        if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
+            return &encodedValue[firstColon + 1 ..];
+        } else return error.InvalidArgument;
+    }
+    // Integers
+    else if (encodedValue[0] == 'i') {
+        const endIndex = std.mem.indexOf(u8, encodedValue, "e") orelse 1; // 1 is invalid pos
+        if ((endIndex - 1) > 0 and encodedValue[1] != '0') {
+            return &encodedValue[1..endIndex];
         }
-        return &encodedValue[firstColon.? + 1 ..];
-    } else {
-        try stdout.print("Only strings are supported at the moment\n", .{});
+        return error.InvalidArgument;
+    }
+    // TODO
+    else {
+        try stdout.print("Only strings and integers are supported for the moment", .{});
         std.process.exit(1);
     }
 }
