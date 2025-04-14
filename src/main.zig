@@ -15,7 +15,7 @@ const Value = union(enum) {
         _ = options;
         switch (self) {
             .string => |str| try writer.print("\"{s}\"", .{str}),
-            .integer => |int| try writer.print("{}", .{int}),
+            .integer => |int| try writer.print("{}\n", .{int}),
         }
     }
 };
