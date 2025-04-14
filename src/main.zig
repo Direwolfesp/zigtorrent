@@ -2,6 +2,24 @@ const std = @import("std");
 const stdout = std.io.getStdOut().writer();
 const allocator = std.heap.page_allocator;
 
+const ParseError = error{
+    InvalidArgument,
+};
+
+const Value = union(enum) {
+    string: []const u8,
+    integer: i64,
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            .string => |str| try writer.print("\"{s}\"", .{str}),
+            .integer => |int| try writer.print("{}", .{int}),
+        }
+    }
+};
+
 pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -14,40 +32,37 @@ pub fn main() !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "decode")) {
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
         std.debug.print("Logs from your program will appear here\n", .{});
 
-        // Uncomment this block to pass the first stage
         const encodedStr = args[2];
         const decodedStr = decodeBencode(encodedStr) catch {
             try stdout.print("Invalid encoded value\n", .{});
             std.process.exit(1);
         };
-        var string = std.ArrayList(u8).init(allocator);
-        try std.json.stringify(decodedStr.*, .{}, string.writer());
-        const jsonStr = try string.toOwnedSlice();
-        try stdout.print("{s}\n", .{jsonStr});
+        try stdout.print("{}", .{decodedStr});
     }
 }
 
-fn decodeBencode(encodedValue: []const u8) !*const []const u8 {
+fn decodeBencode(encodedValue: []const u8) !Value {
     // Strings
     if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
         if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
-            return &encodedValue[firstColon + 1 ..];
-        } else return error.InvalidArgument;
+            return .{ .string = encodedValue[firstColon + 1 ..] };
+        } else return ParseError.InvalidArgument;
     }
     // Integers
     else if (encodedValue[0] == 'i') {
-        const endIndex = std.mem.indexOf(u8, encodedValue, "e") orelse 1; // 1 is invalid pos
+        const endIndex = std.mem.indexOf(u8, encodedValue, "e") orelse return ParseError.InvalidArgument;
         if ((endIndex - 1) > 0 and encodedValue[1] != '0') {
-            return &encodedValue[1..endIndex];
+            return .{ .integer = try std.fmt.parseInt(i64, encodedValue[1..endIndex], 10) };
+        } else {
+            return ParseError.InvalidArgument;
         }
-        return error.InvalidArgument;
     }
     // TODO
     else {
         try stdout.print("Only strings and integers are supported for the moment", .{});
         std.process.exit(1);
+        unreachable;
     }
 }
