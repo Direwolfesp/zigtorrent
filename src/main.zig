@@ -11,7 +11,7 @@ const Value = union(enum) {
     integer: i64,
     list: ?std.ArrayList(Value),
 
-    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype, nested: bool) !void {
         switch (self) {
             .string => |str| try writer.print("\"{s}\"", .{str}),
             .integer => |int| try writer.print("{}", .{int}),
@@ -19,11 +19,11 @@ const Value = union(enum) {
                 if (list_opt) |list| {
                     try writer.print("[", .{});
                     for (list.items, 0..) |elem, i| {
-                        try elem.format(fmt, options, writer);
-                        if (i < list.items.len - 1)
-                            try writer.print(",", .{});
+                        try elem.format(fmt, options, writer, true);
+                        if (i < list.items.len - 1) try writer.print(",", .{});
                     }
-                    try writer.print("]\n", .{});
+                    try writer.print("]", .{});
+                    if (!nested) try writer.print("\n", .{});
                 }
             },
         }
@@ -44,18 +44,26 @@ const Value = union(enum) {
         return switch (self.*) {
             .integer => |int| {
                 var digits: usize = 0;
-                var num: i64 = int;
+                var num: u64 = @abs(int);
                 while (num != 0) {
                     digits += 1;
                     num = @divFloor(num, 10);
                 }
-                const symbols: u8 = if (num >= 0) 2 else 3;
+                const symbols: u8 = if (int >= 0) 2 else 3;
                 return digits + symbols;
             },
             .string => |str| {
                 return str.len + 1 + std.fmt.count("{}", .{str.len});
             },
-            .list => error.Unimplemented,
+            .list => |optList| {
+                var list_len: usize = 2;
+                if (optList) |list| {
+                    for (list.items) |elem| {
+                        list_len += try elem.len();
+                    }
+                }
+                return list_len;
+            },
         };
     }
 };
@@ -80,15 +88,20 @@ pub fn main() !void {
             std.process.exit(1);
         };
         defer decodedStr.deinit();
-        try stdout.print("{}", .{decodedStr});
+        try print(decodedStr, stdout, false);
     }
+}
+
+// Just for the annoying nested '\n' to pass the tests
+fn print(val: Value, writer: anytype, nested: bool) !void {
+    try val.format("", .{}, writer, nested);
 }
 
 fn decodeBencode(encodedValue: []const u8) !Value {
     // Strings
     if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
-        const strlen: u32 = try std.fmt.parseInt(u32, encodedValue[0..1], 10);
         if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
+            const strlen: u32 = try std.fmt.parseInt(u32, encodedValue[0..firstColon], 10);
             return .{ .string = encodedValue[firstColon + 1 .. (firstColon + 1 + strlen)] };
         } else return ParseError.InvalidArgument;
     }
@@ -106,13 +119,17 @@ fn decodeBencode(encodedValue: []const u8) !Value {
         var decodedList = std.ArrayList(Value).init(allocator);
         errdefer decodedList.deinit();
 
-        var i: usize = 1;
-        while (i < encodedValue.len) {
-            if (encodedValue[i] == 'e')
-                break;
+        var i: usize = 1; // i points to the beginning of a Bencode Value
+        while (i < encodedValue.len and encodedValue[i] != 'e') {
             const res = try decodeBencode(encodedValue[i..]);
             try decodedList.append(res);
             i += try res.len();
+
+            if (i < encodedValue.len and encodedValue[i] != 'e' and encodedValue[i] != 'i' and
+                !(encodedValue[i] >= '0' and encodedValue[i] <= '9') and encodedValue[i] != 'l')
+            {
+                return ParseError.InvalidArgument;
+            }
         }
         return .{ .list = decodedList };
     } else {
