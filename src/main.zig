@@ -23,7 +23,7 @@ const Value = union(enum) {
                         if (i < list.items.len - 1)
                             try writer.print(",", .{});
                     }
-                    try writer.print("]", .{});
+                    try writer.print("]\n", .{});
                 }
             },
         }
