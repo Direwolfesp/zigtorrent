@@ -70,12 +70,14 @@ const Value = union(enum) {
                 if (dict_opt) |dict| {
                     try writer.print("{{", .{});
                     var iter = dict.iterator();
-                    while (iter.next()) |entry| {
+                    var i: usize = 0;
+                    while (iter.next()) |entry| : (i += 1) {
                         const key = Value{ .string = entry.key_ptr.* };
                         const val = entry.value_ptr.*;
                         try key.format(fmt, options, writer, true);
                         try writer.print(":", .{});
                         try val.format(fmt, options, writer, true);
+                        if (i < dict.count() - 1) try writer.print(",", .{});
                     }
                     try writer.print("}}", .{});
                     if (!nested) try writer.print("\n", .{});
