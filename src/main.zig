@@ -13,8 +13,14 @@ const Value = union(enum) {
 
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype, nested: bool) !void {
         switch (self) {
-            .string => |str| try writer.print("\"{s}\"", .{str}),
-            .integer => |int| try writer.print("{}\n", .{int}),
+            .string => |str| {
+                try writer.print("\"{s}\"", .{str});
+                if (!nested) try writer.print("\n", .{});
+            },
+            .integer => |int| {
+                try writer.print("{}", .{int});
+                if (!nested) try writer.print("\n", .{});
+            },
             .list => |list_opt| {
                 if (list_opt) |list| {
                     try writer.print("[", .{});
