@@ -37,8 +37,8 @@ const Value = union(enum) {
 
     pub fn deinit(self: *@This()) void {
         switch (self.*) {
-            .list => |*list_ptr| {
-                if (list_ptr.*) |*list| list.deinit();
+            .list => |list_opt| {
+                if (list_opt) |list| list.deinit();
             },
             else => {},
         }
