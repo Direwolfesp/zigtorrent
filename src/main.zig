@@ -1,7 +1,9 @@
 const std = @import("std");
 const stdout = std.io.getStdOut().writer();
-const allocator = std.heap.page_allocator;
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
 const Map = std.StringArrayHashMapUnmanaged(Value);
+const File = std.fs.File;
 
 const ParseError = error{
     InvalidArgument,
@@ -162,8 +164,6 @@ pub fn main() !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "decode")) {
-        std.debug.print("Logs from your program will appear here\n", .{});
-
         const encodedStr = args[2];
         var decodedStr = decodeBencode(encodedStr) catch {
             try stdout.print("Invalid encoded value\n", .{});
@@ -171,6 +171,33 @@ pub fn main() !void {
         };
         defer decodedStr.deinit();
         try print(decodedStr, stdout, false);
+    } else if (std.mem.eql(u8, command, "info")) {
+        const filename = args[2];
+        var file: File = std.fs.cwd().openFile(filename, .{}) catch |err| {
+            try stdout.print("Could not open file: {s}\nError: {!}", .{ filename, err });
+            std.process.exit(1);
+        };
+        defer file.close();
+
+        var buffered = std.io.bufferedReader(file.reader());
+        var bufreader = buffered.reader();
+        var buffer = [_]u8{0} ** 1000;
+        _ = try bufreader.readUntilDelimiterOrEof(buffer[0..], '\n');
+
+        var metaInfo: Value = try decodeBencode(buffer[0..]);
+        defer metaInfo.deinit();
+
+        const a = metaInfo.dict;
+        if (a) |infoDict| {
+            const announce: []const u8 = infoDict.get("announce").?.string;
+            try stdout.print("Tracker URL: {s}\n", .{announce});
+
+            const length: i64 = infoDict.get("info").?
+                .dict.?
+                .get("length").?
+                .integer;
+            try stdout.print("Length: {d}\n", .{length});
+        }
     }
 }
 
