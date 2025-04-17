@@ -28,8 +28,14 @@ const Value = union(enum) {
     // Givan a Value -> JSON string
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype, nested: bool) !void {
         switch (self) {
-            .string => |str| try std.json.stringify(str, .{}, writer),
-            .integer => |int| try std.json.stringify(int, .{}, writer),
+            .string => |str| {
+                try std.json.stringify(str, .{}, writer);
+                if (!nested) try writer.print("\n", .{});
+            },
+            .integer => |int| {
+                try std.json.stringify(int, .{}, writer);
+                if (!nested) try writer.print("\n", .{});
+            },
             .list => |list| {
                 try writer.print("[", .{});
                 for (list.items, 0..) |elem, i| {
