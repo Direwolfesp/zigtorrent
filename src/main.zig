@@ -164,15 +164,34 @@ pub fn main() !void {
                 .integer;
             try stdout.print("Length: {d}\n", .{length});
 
+            // Bencoded Info dictionary hashed
             var string = std.ArrayList(u8).init(allocator);
             defer string.deinit();
-            try encodeBencodeValue(&string, info);
+            try encodeBencode(&string, info);
 
             var sha1 = Sha1.init(.{});
             sha1.update(string.items);
             const hash_bytes: [Sha1.digest_length]u8 = sha1.finalResult();
             const hash_hex = std.fmt.fmtSliceHexLower(&hash_bytes);
             try stdout.print("Info Hash: {s}\n", .{hash_hex});
+
+            // Piece length
+            const piece_length: Value = info.dict.get("piece length").?;
+            try stdout.print("Piece Length: {}\n", .{piece_length.integer});
+
+            // Piece Hashes
+            const pieces_hashes: []const u8 = info.dict.get("pieces").?.string;
+            var hashes = std.ArrayList(u8).init(allocator);
+            defer hashes.deinit();
+
+            try stdout.print("Piece Hashes: \n", .{});
+            var i: usize = 0;
+            while (i < pieces_hashes.len) : (i += 20) {
+                hashes.clearRetainingCapacity();
+                try hashes.appendSlice(pieces_hashes[i .. i + 20]);
+                const piece_hash_hex = std.fmt.fmtSliceHexLower(hashes.items);
+                try stdout.print("{s}\n", .{piece_hash_hex});
+            }
         },
     }
 }
@@ -234,7 +253,7 @@ fn decodeBencode(encodedValue: []const u8) !Value {
 }
 
 // Given a Value -> Bencoded string
-fn encodeBencodeValue(string: *std.ArrayList(u8), toEncode: Value) !void {
+fn encodeBencode(string: *std.ArrayList(u8), toEncode: Value) !void {
     switch (toEncode) {
         .string => |str| {
             try std.json.stringify(str.len, .{}, string.writer());
@@ -249,7 +268,7 @@ fn encodeBencodeValue(string: *std.ArrayList(u8), toEncode: Value) !void {
         .list => |list| {
             try string.append('l');
             for (list.items) |item| {
-                try encodeBencodeValue(string, item);
+                try encodeBencode(string, item);
             }
             try string.append('e');
         },
@@ -257,8 +276,8 @@ fn encodeBencodeValue(string: *std.ArrayList(u8), toEncode: Value) !void {
             try string.append('d');
             var it = dict.iterator();
             while (it.next()) |kv| {
-                try encodeBencodeValue(string, Value{ .string = kv.key_ptr.* });
-                try encodeBencodeValue(string, kv.value_ptr.*);
+                try encodeBencode(string, Value{ .string = kv.key_ptr.* });
+                try encodeBencode(string, kv.value_ptr.*);
             }
             try string.append('e');
         },
