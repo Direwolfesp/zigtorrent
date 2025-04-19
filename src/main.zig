@@ -156,7 +156,21 @@ pub fn main() !void {
 
             // decode response and print
             const bodyDecoded: BencodeValue = try Bencode.decodeBencode(body);
-            try print(bodyDecoded, stdout, false);
+            const peers = bodyDecoded.dict.get("peers").?.string;
+
+            var i: usize = 0;
+            while (i + 5 < peers.len) : (i += 6) {
+                const peer_ip = peers[i .. i + 4];
+                const peer_port: u16 = std.mem.readInt(u16, peers[i + 4 .. i + 6][0..2], .big);
+
+                try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
+                    peer_ip[0],
+                    peer_ip[1],
+                    peer_ip[2],
+                    peer_ip[3],
+                    peer_port,
+                });
+            }
         },
     }
 }
