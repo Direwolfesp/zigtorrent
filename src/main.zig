@@ -137,7 +137,7 @@ pub fn main() !void {
             const server_header_buff: []u8 = try allocator.alloc(u8, 1024);
             defer allocator.free(server_header_buff);
 
-            var req = try client.open(.GET, uri, .{
+            var req: std.http.Client.Request = try client.open(.GET, uri, .{
                 .server_header_buffer = server_header_buff,
             });
             defer req.deinit();
@@ -155,8 +155,7 @@ pub fn main() !void {
             defer allocator.free(body);
 
             // decode response and print
-            const bodyDecoded = try Bencode.decodeBencode(body);
-            try stdout.print("[Response]\n", .{});
+            const bodyDecoded: BencodeValue = try Bencode.decodeBencode(body);
             try print(bodyDecoded, stdout, false);
         },
     }
