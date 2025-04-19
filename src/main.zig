@@ -1,5 +1,7 @@
 const std = @import("std");
+const http = std.http;
 const Bencode = @import("Bencode.zig");
+const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const BencodeValue = @import("Bencode.zig").BencodeValue;
 
 const stdout = std.io.getStdOut().writer();
@@ -51,52 +53,111 @@ pub fn main() !void {
             var meta: BencodeValue = try Bencode.decodeBencode(content);
             defer meta.deinit();
 
-            const metaDict = if (meta == .dict) meta.dict else @panic("Invalid torrent file.\n");
-            const announce: BencodeValue = metaDict.get("announce").?;
-            try stdout.print("Tracker URL: {s}\n", .{announce.string});
-
-            // info dict and length
-            const info: BencodeValue = metaDict.get("info") orelse @panic("info dictionary not found\n");
-            const l: BencodeValue = info.dict.get("length") orelse {
-                try stdout.print("Error: Only supports single file torrents\nFound: ", .{});
-                const files = info.dict.get("files").?;
-                try print(files, stdout, false);
-                std.process.exit(1);
-            };
-            const length: i64 = l.integer;
-            try stdout.print("Length: {d}\n", .{length});
-
-            // Bencoded Info dictionary hashed
-            var string = std.ArrayList(u8).init(allocator);
-            defer string.deinit();
-            try info.encodeBencode(&string);
-
-            var sha1 = Sha1.init(.{});
-            sha1.update(string.items);
-            const hash_bytes: [Sha1.digest_length]u8 = sha1.finalResult();
-            const hash_hex = std.fmt.fmtSliceHexLower(&hash_bytes);
-            try stdout.print("Info Hash: {s}\n", .{hash_hex});
-
-            // Piece length
-            const piece_length: BencodeValue = info.dict.get("piece length").?;
-            try stdout.print("Piece Length: {}\n", .{piece_length.integer});
-
-            // Piece Hashes
-            const pieces_hashes: []const u8 = info.dict.get("pieces").?.string;
-            var hashes = std.ArrayList(u8).init(allocator);
-            defer hashes.deinit();
-
-            try stdout.print("Piece Hashes: \n", .{});
-            var i: usize = 0;
-            while (i < pieces_hashes.len) : (i += 20) {
-                hashes.clearRetainingCapacity();
-                try hashes.appendSlice(pieces_hashes[i .. i + 20]);
-                const piece_hash_hex = std.fmt.fmtSliceHexLower(hashes.items);
-                try stdout.print("{s}\n", .{piece_hash_hex});
-            }
+            var parsedMeta: MetaInfo = undefined;
+            try parsedMeta.init(meta);
+            try parsedMeta.printMetaInfo();
         },
         .peers => {
-            // TODO
+            const filename = args[2];
+            var file: File = try std.fs.cwd().openFile(filename, .{});
+            defer file.close();
+
+            // read contents
+            const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+            defer allocator.free(content);
+
+            // decode bencode
+            var meta: BencodeValue = try Bencode.decodeBencode(content);
+            defer meta.deinit();
+
+            // parse metainfo
+            var parsedMeta: MetaInfo = undefined;
+            try parsedMeta.init(meta);
+
+            // request Params
+            const info_hash: [20]u8 = parsedMeta.info_hash;
+            const peer_id = "-qB6666-weoiuv8324ns";
+            const port: u16 = 6881;
+            const uploaded: i64 = 0;
+            const downloaded: i64 = 0;
+            const left: i64 = parsedMeta.info.length;
+            const compact: u8 = 1;
+
+            // construct query params
+            var query = std.ArrayList(u8).init(allocator);
+            defer query.deinit();
+
+            try query.appendSlice(parsedMeta.announce);
+            try query.append('?');
+
+            try query.appendSlice("info_hash=");
+            const hsh = try std.fmt.allocPrint(
+                allocator,
+                "{%}",
+                .{std.Uri.Component{ .raw = &info_hash }},
+            );
+            try query.appendSlice(hsh);
+
+            try query.appendSlice("&peer_id=");
+            try query.appendSlice(peer_id);
+
+            try query.appendSlice("&port=");
+            const prt = try std.fmt.allocPrint(allocator, "{d}", .{port});
+            try query.appendSlice(prt);
+            defer allocator.free(prt);
+
+            try query.appendSlice("&uploaded=");
+            const up = try std.fmt.allocPrint(allocator, "{d}", .{uploaded});
+            try query.appendSlice(up);
+            defer allocator.free(up);
+
+            try query.appendSlice("&downloaded=");
+            const dl = try std.fmt.allocPrint(allocator, "{d}", .{downloaded});
+            try query.appendSlice(dl);
+            defer allocator.free(dl);
+
+            try query.appendSlice("&left=");
+            const lft = try std.fmt.allocPrint(allocator, "{d}", .{left});
+            try query.appendSlice(lft);
+            defer allocator.free(lft);
+
+            try query.appendSlice("&compact=");
+            const cmpct = try std.fmt.allocPrint(allocator, "{d}", .{compact});
+            try query.appendSlice(cmpct);
+            defer allocator.free(cmpct);
+
+            // final uri
+            const uri = try std.Uri.parse(query.items);
+
+            // create client
+            var client = http.Client{ .allocator = allocator };
+            defer client.deinit();
+
+            // header buffer
+            const server_header_buff: []u8 = try allocator.alloc(u8, 1024);
+            defer allocator.free(server_header_buff);
+
+            var req = try client.open(.GET, uri, .{
+                .server_header_buffer = server_header_buff,
+            });
+            defer req.deinit();
+
+            // make request
+            try req.send();
+            try req.finish();
+            try req.wait();
+
+            if (req.response.status != .ok)
+                return error.RequestFailed;
+
+            // read the bencoded response body
+            const body = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+            defer allocator.free(body);
+
+            // decode response and print
+            const bodyDecoded = try Bencode.decodeBencode(body);
+            try stdout.print("[Response]\n", .{});
+            try print(bodyDecoded, stdout, false);
         },
     }
 }
