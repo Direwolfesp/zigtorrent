@@ -106,7 +106,7 @@ pub fn main() !void {
 
             // decode response and print
             const bodyDecoded: BencodeValue = try Bencode.decodeBencode(body);
-            const peers = bodyDecoded.dict.get("peers").?.string;
+            const peers: []const u8 = bodyDecoded.dict.get("peers").?.string;
 
             var i: usize = 0;
             while (i + 5 < peers.len) : (i += 6) {

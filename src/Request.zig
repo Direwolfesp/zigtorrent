@@ -84,10 +84,5 @@ pub fn create(meta: MetaInfo) !RequestParams {
         .info_hash = meta.info_hash,
         .left = meta.info.length,
         .announce = meta.announce,
-        .compact = 1,
-        .downloaded = 0,
-        .peer_id = "-qB6666-weoiuv8324ns",
-        .port = 6881,
-        .uploaded = 0,
     };
 }
