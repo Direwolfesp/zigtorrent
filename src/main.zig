@@ -119,7 +119,6 @@ pub fn main() !void {
             const writer = connection.writer();
             const reader = connection.reader();
 
-            // try handshake.dumpToWriter(stdout);
             try handshake.dumpToWriter(writer);
             const response: []u8 = try reader.readAllAlloc(allocator, std.math.maxInt(usize));
             defer allocator.free(response);
