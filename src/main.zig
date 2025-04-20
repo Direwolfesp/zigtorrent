@@ -3,6 +3,7 @@ const http = std.http;
 const Bencode = @import("Bencode.zig");
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const BencodeValue = @import("Bencode.zig").BencodeValue;
+const RequestParams = @import("Request.zig");
 
 const stdout = std.io.getStdOut().writer();
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -11,14 +12,11 @@ const Map = std.StringArrayHashMap(Bencode);
 const File = std.fs.File;
 const Sha1 = std.crypto.hash.Sha1;
 
-pub const ParseError = error{
-    InvalidArgument,
-};
-
 const Commands = enum {
     decode,
     info,
     peers,
+    handshake,
 };
 
 pub fn main() !void {
@@ -62,72 +60,24 @@ pub fn main() !void {
             var file: File = try std.fs.cwd().openFile(filename, .{});
             defer file.close();
 
-            // read contents
             const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
             defer allocator.free(content);
 
             // decode bencode
-            var meta: BencodeValue = try Bencode.decodeBencode(content);
-            defer meta.deinit();
+            var value: BencodeValue = try Bencode.decodeBencode(content);
+            defer value.deinit();
 
             // parse metainfo
             var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(meta);
+            try parsedMeta.init(value);
 
             // request Params
-            const info_hash: [20]u8 = parsedMeta.info_hash;
-            const peer_id = "-qB6666-weoiuv8324ns";
-            const port: u16 = 6881;
-            const uploaded: i64 = 0;
-            const downloaded: i64 = 0;
-            const left: i64 = parsedMeta.info.length;
-            const compact: u8 = 1;
+            var req_params = try RequestParams.create(parsedMeta);
 
-            // construct query params
-            var query = std.ArrayList(u8).init(allocator);
-            defer query.deinit();
-
-            try query.appendSlice(parsedMeta.announce);
-            try query.append('?');
-
-            try query.appendSlice("info_hash=");
-            const hsh = try std.fmt.allocPrint(
-                allocator,
-                "{%}",
-                .{std.Uri.Component{ .raw = &info_hash }},
-            );
-            try query.appendSlice(hsh);
-
-            try query.appendSlice("&peer_id=");
-            try query.appendSlice(peer_id);
-
-            try query.appendSlice("&port=");
-            const prt = try std.fmt.allocPrint(allocator, "{d}", .{port});
-            try query.appendSlice(prt);
-            defer allocator.free(prt);
-
-            try query.appendSlice("&uploaded=");
-            const up = try std.fmt.allocPrint(allocator, "{d}", .{uploaded});
-            try query.appendSlice(up);
-            defer allocator.free(up);
-
-            try query.appendSlice("&downloaded=");
-            const dl = try std.fmt.allocPrint(allocator, "{d}", .{downloaded});
-            try query.appendSlice(dl);
-            defer allocator.free(dl);
-
-            try query.appendSlice("&left=");
-            const lft = try std.fmt.allocPrint(allocator, "{d}", .{left});
-            try query.appendSlice(lft);
-            defer allocator.free(lft);
-
-            try query.appendSlice("&compact=");
-            const cmpct = try std.fmt.allocPrint(allocator, "{d}", .{compact});
-            try query.appendSlice(cmpct);
-            defer allocator.free(cmpct);
-
-            // final uri
-            const uri = try std.Uri.parse(query.items);
+            // Serialize to URI
+            var queryBuf = std.ArrayList(u8).init(allocator);
+            defer queryBuf.deinit();
+            const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
 
             // create client
             var client = http.Client{ .allocator = allocator };
@@ -172,6 +122,7 @@ pub fn main() !void {
                 });
             }
         },
+        .handshake => {},
     }
 }
 

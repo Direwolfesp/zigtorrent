@@ -1,5 +1,4 @@
 const std = @import("std");
-const ParseError = @import("main.zig").ParseError;
 const Map = std.StringArrayHashMap(BencodeValue);
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
@@ -13,6 +12,10 @@ const Ctx = struct {
         return std.mem.order(u8, self.map.keys()[a], self.map.keys()[b])
             .compare(.lt);
     }
+};
+
+pub const ParseError = error{
+    InvalidArgument,
 };
 
 pub const BencodeValue = union(enum) {

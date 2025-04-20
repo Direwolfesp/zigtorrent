@@ -2,7 +2,6 @@ const std = @import("std");
 const Sha1 = std.crypto.hash.Sha1;
 const Bencode = @import("Bencode.zig");
 const BencodeValue = @import("Bencode.zig").BencodeValue;
-const ParseError = @import("main.zig").ParseError;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
