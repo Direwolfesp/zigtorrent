@@ -3,7 +3,9 @@ const http = std.http;
 const Bencode = @import("Bencode.zig");
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const BencodeValue = @import("Bencode.zig").BencodeValue;
+const BencodeValueManaged = @import("Bencode.zig").BencodeValueManaged;
 const RequestParams = @import("Request.zig");
+const HandShake = @import("Peer.zig").HandShake;
 
 const stdout = std.io.getStdOut().writer();
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -41,40 +43,22 @@ pub fn main() !void {
             try print(decodedStr, stdout, false);
         },
         .info => {
-            const filename = args[2];
-            var file: File = try std.fs.cwd().openFile(filename, .{});
-            defer file.close();
-
-            const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-            defer allocator.free(content);
-
-            var meta: BencodeValue = try Bencode.decodeBencode(content);
-            defer meta.deinit();
+            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
+            defer bencode.deinit();
 
             var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(meta);
+            try parsedMeta.init(bencode.value);
             try parsedMeta.printMetaInfo();
         },
         .peers => {
-            const filename = args[2];
-            var file: File = try std.fs.cwd().openFile(filename, .{});
-            defer file.close();
+            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
+            defer bencode.deinit();
 
-            const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-            defer allocator.free(content);
-
-            // decode bencode
-            var value: BencodeValue = try Bencode.decodeBencode(content);
-            defer value.deinit();
-
-            // parse metainfo
             var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(value);
+            try parsedMeta.init(bencode.value);
 
-            // request Params
+            // request Params and create URI
             var req_params = try RequestParams.create(parsedMeta);
-
-            // Serialize to URI
             var queryBuf = std.ArrayList(u8).init(allocator);
             defer queryBuf.deinit();
             const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
@@ -96,37 +80,73 @@ pub fn main() !void {
             try req.send();
             try req.finish();
             try req.wait();
-
             if (req.response.status != .ok)
                 return error.RequestFailed;
 
             // read the bencoded response body
-            const body = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+            const body: []u8 = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
             defer allocator.free(body);
 
             // decode response and print
             const bodyDecoded: BencodeValue = try Bencode.decodeBencode(body);
             const peers: []const u8 = bodyDecoded.dict.get("peers").?.string;
-
-            var i: usize = 0;
-            while (i + 5 < peers.len) : (i += 6) {
-                const peer_ip = peers[i .. i + 4];
-                const peer_port: u16 = std.mem.readInt(u16, peers[i + 4 .. i + 6][0..2], .big);
-
-                try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
-                    peer_ip[0],
-                    peer_ip[1],
-                    peer_ip[2],
-                    peer_ip[3],
-                    peer_port,
-                });
-            }
+            try printPeers(peers);
         },
-        .handshake => {},
+        .handshake => {
+            if (args.len != 4) {
+                try stdout.print("Usage: $ ./program handshake <torrent> <peer_ip>:<peer_port>\n", .{});
+                std.process.exit(1);
+            }
+            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
+            defer bencode.deinit();
+
+            // parse handshake
+            var parsedMeta: MetaInfo = undefined;
+            try parsedMeta.init(bencode.value);
+            var handshake = HandShake.createFromMeta(parsedMeta);
+
+            // string address
+            const address = args[3];
+            var it = std.mem.splitScalar(u8, address, ':');
+            const ip: []const u8 = it.first();
+            const port = it.next() orelse return error.MissingPort;
+
+            const addr = try std.net.Address.resolveIp(
+                ip,
+                try std.fmt.parseInt(u16, port, 10),
+            );
+            var connection = try std.net.tcpConnectToAddress(addr);
+            const writer = connection.writer();
+            const reader = connection.reader();
+
+            // try handshake.dumpToWriter(stdout);
+            try handshake.dumpToWriter(writer);
+            const response: []u8 = try reader.readAllAlloc(allocator, std.math.maxInt(usize));
+            defer allocator.free(response);
+            const resp_handshake = HandShake.createFromBuffer(response);
+            const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
+            try stdout.print("Peer ID: {s}\n", .{peer_id});
+        },
     }
 }
 
 // Just for the annoying nested '\n' to pass the tests
 fn print(val: BencodeValue, writer: anytype, nested: bool) !void {
     try val.format("", .{}, writer, nested);
+}
+
+fn printPeers(peers: []const u8) !void {
+    var i: usize = 0;
+    while (i + 5 < peers.len) : (i += 6) {
+        const peer_ip = peers[i .. i + 4];
+        const peer_port: u16 = std.mem.readInt(u16, peers[i + 4 .. i + 6][0..2], .big);
+
+        try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
+            peer_ip[0],
+            peer_ip[1],
+            peer_ip[2],
+            peer_ip[3],
+            peer_port,
+        });
+    }
 }

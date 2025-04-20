@@ -25,6 +25,7 @@ pub const RequestParams = struct {
             .{std.Uri.Component{ .raw = &self.info_hash }},
         );
         try query.appendSlice(hsh);
+        defer allocator.free(hsh);
 
         try query.appendSlice("&peer_id=");
         try query.appendSlice(self.peer_id);

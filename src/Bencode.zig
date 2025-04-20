@@ -147,7 +147,7 @@ pub const BencodeValue = union(enum) {
             },
         }
     }
-};
+}; // end BencodeValue
 
 // Given a Bencoded string -> BencodeValue
 pub fn decodeBencode(encodedValue: []const u8) !BencodeValue {
@@ -198,6 +198,29 @@ pub fn decodeBencode(encodedValue: []const u8) !BencodeValue {
             std.process.exit(1);
         },
     }
+}
+
+// Contains a pointer to the buffer it uses
+// must call deinit() on it
+pub const BencodeValueManaged = struct {
+    value: BencodeValue,
+    backing_buffer: []u8,
+
+    pub fn deinit(self: *@This()) void {
+        self.value.deinit();
+        allocator.free(self.backing_buffer);
+    }
+};
+
+// Parses a file and returns its decoded content
+pub fn decodeBencodeFromFile(path: []const u8) !BencodeValueManaged {
+    var file: std.fs.File = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const content: []u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    return .{
+        .value = try decodeBencode(content),
+        .backing_buffer = content,
+    };
 }
 
 test "len" {
