@@ -95,15 +95,10 @@ pub const MetaInfo = struct {
     }
 
     fn printPieceHashes(self: @This()) !void {
-        var hashes = std.ArrayList(u8).init(allocator);
-        defer hashes.deinit();
-
         try stdout.print("Piece Hashes: \n", .{});
-        var i: usize = 0;
-        while (i < self.info.pieces.len) : (i += 20) {
-            hashes.clearRetainingCapacity();
-            try hashes.appendSlice(self.info.pieces[i .. i + 20]);
-            const piece_hash_hex = std.fmt.fmtSliceHexLower(hashes.items);
+        var win = std.mem.window(u8, self.info.pieces, 20, 20);
+        while (win.next()) |hash| {
+            const piece_hash_hex = std.fmt.fmtSliceHexLower(hash);
             try stdout.print("{s}\n", .{piece_hash_hex});
         }
     }

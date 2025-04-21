@@ -15,14 +15,13 @@ pub const HandShake = struct {
     }
 
     // (49+len(pstr)) bytes long
-    pub fn createFromBuffer(info: []u8) HandShake {
-        std.debug.assert(info.len == 49 + 19);
+    pub fn createFromBuffer(buffer: []u8) HandShake {
         return HandShake{
-            .pstrlen = info[0],
-            .pstr = info[1..20].*,
-            .reserved = info[20..28].*,
-            .info_hash = info[28..48].*,
-            .peer_id = info[48..68].*,
+            .pstrlen = buffer[0],
+            .pstr = buffer[1..20].*,
+            .reserved = buffer[20..28].*,
+            .info_hash = buffer[28..48].*,
+            .peer_id = buffer[48..68].*,
         };
     }
 
@@ -36,3 +35,7 @@ pub const HandShake = struct {
         });
     }
 };
+
+test "createhandshake" {
+    // TODO
+}
