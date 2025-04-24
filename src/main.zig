@@ -1,0 +1,150 @@
+const std = @import("std");
+const http = std.http;
+const Bencode = @import("Bencode.zig");
+const MetaInfo = @import("MetaInfo.zig").MetaInfo;
+const BencodeValue = @import("Bencode.zig").BencodeValue;
+const BencodeValueManaged = @import("Bencode.zig").BencodeValueManaged;
+const RequestParams = @import("Request.zig");
+const HandShake = @import("Peer.zig").HandShake;
+
+const stdout = std.io.getStdOut().writer();
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator(); // global allocator is probably not a good idea
+const File = std.fs.File;
+const Sha1 = std.crypto.hash.Sha1;
+
+const Commands = enum {
+    decode,
+    info,
+    peers,
+    handshake,
+};
+
+pub fn main() !void {
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len < 3) {
+        try stdout.print("Usage: your_bittorrent.zig <command> <args>\n", .{});
+        std.process.exit(1);
+    }
+
+    const command = std.meta.stringToEnum(Commands, args[1]) orelse return;
+
+    switch (command) {
+        .decode => {
+            const encodedStr = args[2];
+            var decodedStr = Bencode.decodeBencode(encodedStr) catch {
+                try stdout.print("Invalid encoded value\n", .{});
+                std.process.exit(1);
+            };
+            defer decodedStr.deinit();
+            try print(decodedStr, stdout, false);
+        },
+        .info => {
+            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
+            defer bencode.deinit();
+
+            var parsedMeta: MetaInfo = undefined;
+            try parsedMeta.init(bencode.value);
+            try parsedMeta.printMetaInfo();
+        },
+        .peers => {
+            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
+            defer bencode.deinit();
+
+            var parsedMeta: MetaInfo = undefined;
+            try parsedMeta.init(bencode.value);
+
+            // request Params and create URI
+            var req_params = try RequestParams.create(parsedMeta);
+            var queryBuf = std.ArrayList(u8).init(allocator);
+            defer queryBuf.deinit();
+            const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
+
+            // create client
+            var client = http.Client{ .allocator = allocator };
+            defer client.deinit();
+
+            // header buffer
+            const server_header_buff: []u8 = try allocator.alloc(u8, 1024);
+            defer allocator.free(server_header_buff);
+
+            var req: std.http.Client.Request = try client.open(.GET, uri, .{
+                .server_header_buffer = server_header_buff,
+            });
+            defer req.deinit();
+
+            // make request
+            try req.send();
+            try req.finish();
+            try req.wait();
+            if (req.response.status != .ok)
+                return error.RequestFailed;
+
+            // read the bencoded response body
+            const body: []u8 = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+            defer allocator.free(body);
+
+            // decode response and print
+            const bodyDecoded: BencodeValue = try Bencode.decodeBencode(body);
+            const peers: []const u8 = bodyDecoded.dict.get("peers").?.string;
+            try printPeers(peers);
+        },
+        .handshake => {
+            if (args.len != 4) {
+                try stdout.print("Usage: $ ./program handshake <torrent> <peer_ip>:<peer_port>\n", .{});
+                std.process.exit(1);
+            }
+            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
+            defer bencode.deinit();
+
+            // parse handshake
+            var parsedMeta: MetaInfo = undefined;
+            try parsedMeta.init(bencode.value);
+            var handshake = HandShake.createFromMeta(parsedMeta);
+
+            // string address
+            const address = args[3];
+            var it = std.mem.splitScalar(u8, address, ':');
+            const ip: []const u8 = it.first();
+            const port = it.next() orelse return error.MissingPort;
+
+            const addr = try std.net.Address.resolveIp(
+                ip,
+                try std.fmt.parseInt(u16, port, 10),
+            );
+            var connection = try std.net.tcpConnectToAddress(addr);
+            const writer = connection.writer();
+            const reader = connection.reader();
+
+            try handshake.dumpToWriter(writer);
+            const response: []u8 = try reader.readAllAlloc(allocator, std.math.maxInt(usize));
+            defer allocator.free(response);
+            const resp_handshake = HandShake.createFromBuffer(response);
+            const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
+            try stdout.print("Peer ID: {s}\n", .{peer_id});
+        },
+    }
+}
+
+// Just for the annoying nested '\n' to pass the tests
+fn print(val: BencodeValue, writer: anytype, nested: bool) !void {
+    try val.format("", .{}, writer, nested);
+}
+
+fn printPeers(peers: []const u8) !void {
+    var i: usize = 0;
+    while (i + 5 < peers.len) : (i += 6) {
+        const peer_ip = peers[i .. i + 4];
+        const peer_port: u16 = std.mem.readInt(u16, peers[i + 4 .. i + 6][0..2], .big);
+
+        try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
+            peer_ip[0],
+            peer_ip[1],
+            peer_ip[2],
+            peer_ip[3],
+            peer_port,
+        });
+    }
+}
