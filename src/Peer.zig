@@ -93,11 +93,14 @@ test "message size" {
     var debug = std.heap.DebugAllocator(.{}){};
     const alloc = debug.allocator();
 
-    var msg: Message = .{
-        .msg_id = .Choke,
-        .payload = "HELLO",
-    };
-    const result = try msg.serialize(alloc);
-    defer alloc.free(result);
-    try t.expectEqual(result.len, 4 + 1 + 5); // length is 10 bytes
+    var msg: Message = .{ .msg_id = .Choke, .payload = "HELLO" };
+    const res = try msg.serialize(alloc);
+    defer alloc.free(res);
+
+    var msg2: Message = .{ .msg_id = .NotInterested, .payload = "LongerString" };
+    const res2 = try msg2.serialize(alloc);
+    defer alloc.free(res2);
+
+    try t.expectEqual(res.len, 4 + 1 + 5); // length is 10 bytes
+    try t.expectEqual(res2.len, 4 + 1 + 12); // length is 17 bytes
 }
