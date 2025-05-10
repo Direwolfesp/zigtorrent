@@ -1,10 +1,8 @@
 const std = @import("std");
 const Sha1 = std.crypto.hash.Sha1;
 const Bencode = @import("Bencode.zig");
-const BencodeValue = @import("Bencode.zig").BencodeValue;
-
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
+const BencodeValue = Bencode.BencodeValue;
+const Allocator = std.mem.Allocator;
 const stdout = std.io.getStdOut().writer();
 const testing = std.testing;
 
@@ -14,8 +12,8 @@ const MetaInfoError = error{
     NotSingleFile,
 };
 
-// MetaInfo dictionary for bittorrent
-// Single File Only
+/// MetaInfo dictionary for bittorrent
+/// Single File Only
 pub const MetaInfo = struct {
     announce: []const u8 = undefined,
     info: Info,
@@ -28,7 +26,7 @@ pub const MetaInfo = struct {
         length: i64,
     };
 
-    pub fn init(self: *@This(), value: BencodeValue) !void {
+    pub fn init(self: *@This(), allocator: Allocator, value: BencodeValue) !void {
         if (value != .dict) {
             return MetaInfoError.WrongType;
         }

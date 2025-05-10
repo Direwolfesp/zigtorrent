@@ -6,10 +6,7 @@ const BencodeValue = @import("Bencode.zig").BencodeValue;
 const BencodeValueManaged = @import("Bencode.zig").BencodeValueManaged;
 const RequestParams = @import("Request.zig");
 const HandShake = @import("Peer.zig").HandShake;
-
 const stdout = std.io.getStdOut().writer();
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator(); // global allocator is probably not a good idea
 const File = std.fs.File;
 const Sha1 = std.crypto.hash.Sha1;
 
@@ -21,6 +18,9 @@ const Commands = enum {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -34,7 +34,7 @@ pub fn main() !void {
     switch (command) {
         .decode => {
             const encodedStr = args[2];
-            var decodedStr = Bencode.decodeBencode(encodedStr) catch {
+            var decodedStr = Bencode.decodeBencode(allocator, encodedStr) catch {
                 try stdout.print("Invalid encoded value\n", .{});
                 std.process.exit(1);
             };
@@ -42,25 +42,25 @@ pub fn main() !void {
             try print(decodedStr, stdout, false);
         },
         .info => {
-            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
-            defer bencode.deinit();
+            var bencode: BencodeValueManaged = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            defer bencode.deinit(allocator);
 
             var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(bencode.value);
+            try parsedMeta.init(allocator, bencode.value);
             try parsedMeta.printMetaInfo();
         },
         .peers => {
-            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
-            defer bencode.deinit();
+            var bencode: BencodeValueManaged = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            defer bencode.deinit(allocator);
 
             var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(bencode.value);
+            try parsedMeta.init(allocator, bencode.value);
 
             // request Params and create URI
-            var req_params = try RequestParams.create(parsedMeta);
+            var req_params = RequestParams.create(parsedMeta);
             var queryBuf = std.ArrayList(u8).init(allocator);
             defer queryBuf.deinit();
-            const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
+            const uri: std.Uri = try req_params.toURI(allocator, &queryBuf);
 
             // create client
             var client = http.Client{ .allocator = allocator };
@@ -87,7 +87,7 @@ pub fn main() !void {
             defer allocator.free(body);
 
             // decode response and print
-            const bodyDecoded: BencodeValue = try Bencode.decodeBencode(body);
+            const bodyDecoded: BencodeValue = try Bencode.decodeBencode(allocator, body);
             const peers: []const u8 = bodyDecoded.dict.get("peers").?.string;
             try printPeers(peers);
         },
@@ -96,12 +96,12 @@ pub fn main() !void {
                 try stdout.print("Usage: $ ./program handshake <torrent> <peer_ip>:<peer_port>\n", .{});
                 std.process.exit(1);
             }
-            var bencode = try Bencode.decodeBencodeFromFile(args[2]);
-            defer bencode.deinit();
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            defer bencode.deinit(allocator);
 
             // parse handshake
             var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(bencode.value);
+            try parsedMeta.init(allocator, bencode.value);
             var handshake = HandShake.createFromMeta(parsedMeta);
 
             // string address

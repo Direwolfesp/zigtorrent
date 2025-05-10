@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 
 pub const HandShake = struct {
@@ -61,7 +62,7 @@ pub const Message = struct {
     // Serialized the message to a slice
     // format: <id+payload len:u32><msg_id:u8><payload:[]u8>
     // Result must be freed!
-    pub fn serialize(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+    pub fn serialize(self: @This(), allocator: Allocator) ![]u8 {
         var buff = try allocator.alloc(u8, self.payload.len + 4 + 1);
 
         const size: u32 = @intCast(self.payload.len + 1);

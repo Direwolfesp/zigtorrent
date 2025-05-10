@@ -1,10 +1,9 @@
 const std = @import("std");
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
 const stdout = std.io.getStdOut().writer();
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
 
-// For sorting the key strings of the hash table
+/// For sorting the key strings of the hash table
 const Ctx = struct {
     map: std.StringArrayHashMap(BencodeValue),
     pub fn lessThan(self: @This(), a: usize, b: usize) bool {
@@ -23,7 +22,7 @@ pub const BencodeValue = union(enum) {
     list: std.ArrayList(BencodeValue),
     dict: std.StringArrayHashMap(BencodeValue),
 
-    // Givan a Value -> JSON string
+    /// Givan a Value -> JSON string
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype, nested: bool) !void {
         switch (self) {
             .string => |str| {
@@ -80,7 +79,7 @@ pub const BencodeValue = union(enum) {
         }
     }
 
-    // Returns how many bytes does the bencoded value occupies
+    /// Returns how many bytes does the bencoded value occupies
     pub fn len(self: *const @This()) !usize {
         return switch (self.*) {
             .integer => |int| {
@@ -113,7 +112,7 @@ pub const BencodeValue = union(enum) {
         };
     }
 
-    // Returns the Bencoded string from a BencodedValue
+    /// Returns the Bencoded string from a BencodedValue
     pub fn encodeBencode(self: @This(), string: *std.ArrayList(u8)) !void {
         switch (self) {
             .string => |str| {
@@ -148,8 +147,8 @@ pub const BencodeValue = union(enum) {
     }
 }; // end BencodeValue
 
-// Given a Bencoded string -> BencodeValue
-pub fn decodeBencode(encodedValue: []const u8) !BencodeValue {
+/// Given a Bencoded string -> BencodeValue
+pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeValue {
     switch (encodedValue[0]) {
         '0'...'9' => {
             if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
@@ -171,7 +170,7 @@ pub fn decodeBencode(encodedValue: []const u8) !BencodeValue {
 
             var i: usize = 1; // i points to the beginning of a Bencode Value
             while (i < encodedValue.len and encodedValue[i] != 'e') {
-                const res = try decodeBencode(encodedValue[i..]);
+                const res = try decodeBencode(allocator, encodedValue[i..]);
                 try decodedList.append(res);
                 i += try res.len();
             }
@@ -183,9 +182,9 @@ pub fn decodeBencode(encodedValue: []const u8) !BencodeValue {
 
             var i: usize = 1;
             while (i < encodedValue.len and encodedValue[i] != 'e') {
-                const key = try decodeBencode(encodedValue[i..]);
+                const key = try decodeBencode(allocator, encodedValue[i..]);
                 i += try key.len();
-                const val = try decodeBencode(encodedValue[i..]);
+                const val = try decodeBencode(allocator, encodedValue[i..]);
                 try decodedDict.put(key.string, val);
                 i += try val.len();
             }
@@ -199,25 +198,25 @@ pub fn decodeBencode(encodedValue: []const u8) !BencodeValue {
     }
 }
 
-// Contains a pointer to the buffer it uses
-// must call deinit() on it
+/// Owns the content from the file,
+/// thus requires freeing memory with deinit()
 pub const BencodeValueManaged = struct {
     value: BencodeValue,
     backing_buffer: []u8,
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
         self.value.deinit();
         allocator.free(self.backing_buffer);
     }
 };
 
-// Parses a file and returns its decoded content
-pub fn decodeBencodeFromFile(path: []const u8) !BencodeValueManaged {
+/// Parses a file and returns its decoded content
+pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !BencodeValueManaged {
     var file: std.fs.File = try std.fs.cwd().openFile(path, .{});
     defer file.close();
     const content: []u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
     return .{
-        .value = try decodeBencode(content),
+        .value = try decodeBencode(allocator, content),
         .backing_buffer = content,
     };
 }
