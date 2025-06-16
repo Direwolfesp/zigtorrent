@@ -1,8 +1,9 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const stdout = std.io.getStdOut().writer();
+
 const Bencode = @import("Bencode.zig");
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
-const stdout = std.io.getStdOut().writer();
-const Allocator = std.mem.Allocator;
 
 pub const RequestParams = struct {
     announce: []const u8 = undefined,

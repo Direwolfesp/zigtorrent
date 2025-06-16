@@ -23,7 +23,13 @@ pub const BencodeValue = union(enum) {
     dict: std.StringArrayHashMap(BencodeValue),
 
     /// Givan a Value -> JSON string
-    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype, nested: bool) !void {
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+        nested: bool,
+    ) !void {
         switch (self) {
             .string => |str| {
                 try std.json.stringify(str, .{}, writer);
@@ -37,7 +43,8 @@ pub const BencodeValue = union(enum) {
                 try writer.print("[", .{});
                 for (list.items, 0..) |elem, i| {
                     try elem.format(fmt, options, writer, true);
-                    if (i < list.items.len - 1) try writer.print(",", .{});
+                    if (i < list.items.len - 1)
+                        try writer.print(",", .{});
                 }
                 try writer.print("]", .{});
                 if (!nested) try writer.print("\n", .{});
@@ -95,9 +102,8 @@ pub const BencodeValue = union(enum) {
             .string => |str| 1 + str.len + std.fmt.count("{}", .{str.len}),
             .list => |list| {
                 var list_len: usize = 2;
-                for (list.items) |elem| {
+                for (list.items) |elem|
                     list_len += try elem.len();
-                }
                 return list_len;
             },
             .dict => |dict| {
@@ -127,9 +133,8 @@ pub const BencodeValue = union(enum) {
             },
             .list => |list| {
                 try string.append('l');
-                for (list.items) |item| {
+                for (list.items) |item|
                     try item.encodeBencode(string);
-                }
                 try string.append('e');
             },
             .dict => |dict| {
@@ -152,17 +157,26 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeVal
     switch (encodedValue[0]) {
         '0'...'9' => {
             if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
-                const strlen: u32 = try std.fmt.parseInt(u32, encodedValue[0..firstColon], 10);
-                return .{ .string = encodedValue[firstColon + 1 .. (firstColon + 1 + strlen)] };
+                const strlen: u32 = try std.fmt.parseInt(
+                    u32,
+                    encodedValue[0..firstColon],
+                    10,
+                );
+                return .{
+                    .string = encodedValue[firstColon + 1 .. (firstColon + 1 + strlen)],
+                };
             } else return ParseError.InvalidArgument;
         },
         'i' => {
-            const endIndex = std.mem.indexOf(u8, encodedValue, "e") orelse return ParseError.InvalidArgument;
-            if ((endIndex - 1) > 0 and encodedValue[1] != '0') {
-                return .{ .integer = try std.fmt.parseInt(i64, encodedValue[1..endIndex], 10) };
-            } else {
-                return ParseError.InvalidArgument;
+            const endIndex = std.mem.indexOf(u8, encodedValue, "e");
+            if (endIndex) |index| {
+                if ((index - 1) > 0 and encodedValue[1] != '0') {
+                    return .{
+                        .integer = try std.fmt.parseInt(i64, encodedValue[1..index], 10),
+                    };
+                }
             }
+            return ParseError.InvalidArgument;
         },
         'l' => {
             var decodedList = std.ArrayList(BencodeValue).init(allocator);
@@ -192,7 +206,10 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeVal
             return .{ .dict = decodedDict };
         },
         else => {
-            try stdout.print("Only Strings, Integers, Lists and Dictionaries are available at the moment: {c}\n", .{encodedValue[0]});
+            try stdout.print(
+                "Only Strings, Integers, Lists and Dictionaries are available at the moment: {c}\n",
+                .{encodedValue[0]},
+            );
             std.process.exit(1);
         },
     }
@@ -210,7 +227,8 @@ pub const BencodeValueManaged = struct {
     }
 };
 
-/// Parses a file and returns its decoded content
+/// Parses a file and returns its decoded content.
+/// Requires freeing the underlaying buffer
 pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !BencodeValueManaged {
     var file: std.fs.File = try std.fs.cwd().openFile(path, .{});
     defer file.close();
@@ -222,20 +240,23 @@ pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !BencodeVal
 }
 
 test "len" {
+    var debug = std.heap.DebugAllocator(.{}){};
+    const alloc = debug.allocator();
+
     const val = "i-34e";
-    const ben = try BencodeValue.decodeBencode(val);
+    const ben = try decodeBencode(alloc, val);
     try testing.expect(try ben.len() == 5);
 
     const val1 = "i773e";
-    const ben1 = try BencodeValue.decodeBencode(val1);
+    const ben1 = try decodeBencode(alloc, val1);
     try testing.expect(try ben1.len() == 5);
 
     const val2 = "10:HelloWorld";
-    const ben2 = try BencodeValue.decodeBencode(val2);
+    const ben2 = try decodeBencode(alloc, val2);
     try testing.expect(try ben2.len() == 13);
 
     const val3 = "l10:HelloWorldi773ee";
-    var ben3 = try BencodeValue.decodeBencode(val3);
+    var ben3 = try decodeBencode(alloc, val3);
     defer ben3.deinit();
     try testing.expect(try ben3.len() == 20);
 }

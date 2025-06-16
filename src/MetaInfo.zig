@@ -1,10 +1,11 @@
 const std = @import("std");
 const Sha1 = std.crypto.hash.Sha1;
+const Allocator = std.mem.Allocator;
+const testing = std.testing;
+const stdout = std.io.getStdOut().writer();
+
 const Bencode = @import("Bencode.zig");
 const BencodeValue = Bencode.BencodeValue;
-const Allocator = std.mem.Allocator;
-const stdout = std.io.getStdOut().writer();
-const testing = std.testing;
 
 const MetaInfoError = error{
     WrongType,
@@ -81,7 +82,7 @@ pub const MetaInfo = struct {
             \\Tracker URL: {s}
             \\Length: {d}
             \\Info Hash: {s}
-            \\Piece Length: {d} 
+            \\Piece Length: {d}
             \\
         , .{
             self.announce,

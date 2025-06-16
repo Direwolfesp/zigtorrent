@@ -1,14 +1,15 @@
 const std = @import("std");
-const http = std.http;
-const Bencode = @import("Bencode.zig");
-const MetaInfo = @import("MetaInfo.zig").MetaInfo;
-const BencodeValue = @import("Bencode.zig").BencodeValue;
-const BencodeValueManaged = @import("Bencode.zig").BencodeValueManaged;
-const RequestParams = @import("Request.zig");
-const HandShake = @import("Peer.zig").HandShake;
 const stdout = std.io.getStdOut().writer();
+const http = std.http;
 const File = std.fs.File;
 const Sha1 = std.crypto.hash.Sha1;
+
+const Bencode = @import("Bencode.zig");
+const BencodeValue = @import("Bencode.zig").BencodeValue;
+const BencodeValueManaged = @import("Bencode.zig").BencodeValueManaged;
+const HandShake = @import("Peer.zig").HandShake;
+const MetaInfo = @import("MetaInfo.zig").MetaInfo;
+const RequestParams = @import("Request.zig");
 
 const Commands = enum {
     decode,
@@ -28,10 +29,8 @@ pub fn main() !void {
         try stdout.print("Usage: your_bittorrent.zig <command> <args>\n", .{});
         std.process.exit(1);
     }
-
-    const command = std.meta.stringToEnum(Commands, args[1]) orelse return;
-
-    switch (command) {
+    const cmd = std.meta.stringToEnum(Commands, args[1]).?;
+    switch (cmd) {
         .decode => {
             const encodedStr = args[2];
             var decodedStr = Bencode.decodeBencode(allocator, encodedStr) catch {
@@ -42,7 +41,7 @@ pub fn main() !void {
             try print(decodedStr, stdout, false);
         },
         .info => {
-            var bencode: BencodeValueManaged = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
             defer bencode.deinit(allocator);
 
             var parsedMeta: MetaInfo = undefined;
@@ -50,7 +49,7 @@ pub fn main() !void {
             try parsedMeta.printMetaInfo();
         },
         .peers => {
-            var bencode: BencodeValueManaged = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
             defer bencode.deinit(allocator);
 
             var parsedMeta: MetaInfo = undefined;
@@ -83,7 +82,10 @@ pub fn main() !void {
                 return error.RequestFailed;
 
             // read the bencoded response body
-            const body: []u8 = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+            const body: []u8 = try req.reader().readAllAlloc(
+                allocator,
+                std.math.maxInt(usize),
+            );
             defer allocator.free(body);
 
             // decode response and print
@@ -119,9 +121,13 @@ pub fn main() !void {
             const reader = connection.reader();
 
             try handshake.dumpToWriter(writer);
-            const response: []u8 = try reader.readAllAlloc(allocator, std.math.maxInt(usize));
+            const response: []u8 = try reader.readAllAlloc(
+                allocator,
+                std.math.maxInt(usize),
+            );
             defer allocator.free(response);
             const resp_handshake = HandShake.createFromBuffer(response);
+
             const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
             try stdout.print("Peer ID: {s}\n", .{peer_id});
         },
@@ -137,8 +143,11 @@ fn printPeers(peers: []const u8) !void {
     var i: usize = 0;
     while (i + 5 < peers.len) : (i += 6) {
         const peer_ip = peers[i .. i + 4];
-        const peer_port: u16 = std.mem.readInt(u16, peers[i + 4 .. i + 6][0..2], .big);
-
+        const peer_port: u16 = std.mem.readInt(
+            u16,
+            peers[i + 4 .. i + 6][0..2],
+            .big,
+        );
         try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
             peer_ip[0],
             peer_ip[1],
