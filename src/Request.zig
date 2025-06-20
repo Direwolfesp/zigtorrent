@@ -16,7 +16,7 @@ pub const RequestParams = struct {
     compact: u8 = 1,
 
     /// Construct query params in encoded URI
-    pub fn toURI(self: @This(), allocator: Allocator, query: *std.ArrayList(u8)) !std.Uri {
+    pub fn toURI(self: @This(), query: *std.ArrayList(u8), allocator: Allocator) !std.Uri {
         try query.appendSlice(self.announce);
         try query.append('?');
 

@@ -59,7 +59,7 @@ pub fn main() !void {
             var req_params = RequestParams.create(parsedMeta);
             var queryBuf = std.ArrayList(u8).init(allocator);
             defer queryBuf.deinit();
-            const uri: std.Uri = try req_params.toURI(allocator, &queryBuf);
+            const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
 
             // create client
             var client = http.Client{ .allocator = allocator };

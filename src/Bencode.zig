@@ -14,6 +14,9 @@ const Ctx = struct {
 
 pub const ParseError = error{
     InvalidArgument,
+    IntegerNotFound,
+    IllegalInteger,
+    StringError,
 };
 
 pub const BencodeValue = union(enum) {
@@ -90,12 +93,8 @@ pub const BencodeValue = union(enum) {
     pub fn len(self: *const @This()) !usize {
         return switch (self.*) {
             .integer => |int| {
-                var digits: usize = 0;
-                var num: u64 = @abs(int);
-                while (num != 0) {
-                    digits += 1;
-                    num = @divFloor(num, 10);
-                }
+                const abs = @abs(int);
+                const digits: usize = if (abs == 0) 1 else std.math.log10(abs) + 1;
                 const symbols: u8 = if (int >= 0) 2 else 3;
                 return digits + symbols;
             },
@@ -165,18 +164,19 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeVal
                 return .{
                     .string = encodedValue[firstColon + 1 .. (firstColon + 1 + strlen)],
                 };
-            } else return ParseError.InvalidArgument;
+            } else return ParseError.StringError;
         },
         'i' => {
             const endIndex = std.mem.indexOf(u8, encodedValue, "e");
             if (endIndex) |index| {
-                if ((index - 1) > 0 and encodedValue[1] != '0') {
+                if (index - 1 > 0) {
                     return .{
                         .integer = try std.fmt.parseInt(i64, encodedValue[1..index], 10),
                     };
                 }
+                return ParseError.IllegalInteger;
             }
-            return ParseError.InvalidArgument;
+            return ParseError.IntegerNotFound;
         },
         'l' => {
             var decodedList = std.ArrayList(BencodeValue).init(allocator);
@@ -242,21 +242,34 @@ pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !BencodeVal
 test "len" {
     var debug = std.heap.DebugAllocator(.{}){};
     const alloc = debug.allocator();
+    {
+        const val = "i-34e";
+        const ben = try decodeBencode(alloc, val);
+        try testing.expect(try ben.len() == 5);
+    }
 
-    const val = "i-34e";
-    const ben = try decodeBencode(alloc, val);
-    try testing.expect(try ben.len() == 5);
+    {
+        const val = "i0e";
+        const ben = try decodeBencode(alloc, val);
+        try testing.expect(try ben.len() == 3);
+    }
 
-    const val1 = "i773e";
-    const ben1 = try decodeBencode(alloc, val1);
-    try testing.expect(try ben1.len() == 5);
+    {
+        const val = "i773e";
+        const ben = try decodeBencode(alloc, val);
+        try testing.expect(try ben.len() == 5);
+    }
 
-    const val2 = "10:HelloWorld";
-    const ben2 = try decodeBencode(alloc, val2);
-    try testing.expect(try ben2.len() == 13);
+    {
+        const val = "10:HelloWorld";
+        const ben = try decodeBencode(alloc, val);
+        try testing.expect(try ben.len() == 13);
+    }
 
-    const val3 = "l10:HelloWorldi773ee";
-    var ben3 = try decodeBencode(alloc, val3);
-    defer ben3.deinit();
-    try testing.expect(try ben3.len() == 20);
+    {
+        const val = "l10:HelloWorldi773ee";
+        var ben = try decodeBencode(alloc, val);
+        defer ben.deinit();
+        try testing.expect(try ben.len() == 20);
+    }
 }
