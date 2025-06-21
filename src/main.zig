@@ -157,3 +157,8 @@ fn printPeers(peers: []const u8) !void {
         });
     }
 }
+
+// Run all the test of the types that are attached to main
+test {
+    std.testing.refAllDecls(@This());
+}
