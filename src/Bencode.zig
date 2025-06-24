@@ -240,8 +240,7 @@ pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !BencodeVal
 }
 
 test "len" {
-    var debug = std.heap.DebugAllocator(.{}){};
-    const alloc = debug.allocator();
+    const alloc = std.testing.allocator;
     {
         const val = "i-34e";
         const ben = try decodeBencode(alloc, val);

@@ -92,8 +92,7 @@ const MessageError = error{
 
 test "message size" {
     const t = std.testing;
-    var debug = std.heap.DebugAllocator(.{}){};
-    const alloc = debug.allocator();
+    const alloc = std.testing.allocator;
 
     var msg: Message = .{ .msg_id = .Choke, .payload = "HELLO" };
     const res = try msg.serialize(alloc);

@@ -99,37 +99,44 @@ pub fn main() !void {
                 std.process.exit(1);
             }
             var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            std.log.info("Parsed file {s}", .{args[2]});
             defer bencode.deinit(allocator);
 
-            // parse handshake
+            // create handshake
             var parsedMeta: MetaInfo = undefined;
             try parsedMeta.init(allocator, bencode.value);
             var handshake = HandShake.createFromMeta(parsedMeta);
+            std.log.info("Created handshake struct", .{});
 
-            // string address
+            // create ipv4 address
             const address = args[3];
             var it = std.mem.splitScalar(u8, address, ':');
             const ip: []const u8 = it.first();
             const port = it.next() orelse return error.MissingPort;
-
             const addr = try std.net.Address.resolveIp(
                 ip,
                 try std.fmt.parseInt(u16, port, 10),
             );
+            std.log.info("Peer ip: {?}", .{addr});
+
+            std.log.info("Trying to connect to peer...", .{});
             var connection = try std.net.tcpConnectToAddress(addr);
+            std.log.info("Connected to peer", .{});
             const writer = connection.writer();
             const reader = connection.reader();
 
+            std.log.info("Sending handshake to peer...", .{});
             try handshake.dumpToWriter(writer);
+            std.log.info("Waiting for response...", .{});
             const response: []u8 = try reader.readAllAlloc(
                 allocator,
                 std.math.maxInt(usize),
             );
             defer allocator.free(response);
+            std.log.info("Got a response from peer ", .{});
             const resp_handshake = HandShake.createFromBuffer(response);
-
             const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
-            try stdout.print("Peer ID: {s}\n", .{peer_id});
+            std.log.info("Peer ID: {s}", .{peer_id});
         },
     }
 }
