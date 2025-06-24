@@ -127,7 +127,7 @@ pub fn main() !void {
             std.log.info("Sending handshake to peer...", .{});
             try writer.writeStruct(handshake);
             std.log.info("Waiting for response...", .{});
-            const resp_handshake = try reader.readStruct(HandShake);
+            const resp_handshake: HandShake = try reader.readStruct(HandShake);
             std.log.info("Got a response from peer ", .{});
             const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
             std.log.info("Peer ID: {s}", .{peer_id});
