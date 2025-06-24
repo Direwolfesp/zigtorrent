@@ -3,12 +3,13 @@ const Allocator = std.mem.Allocator;
 
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 
-pub const HandShake = struct {
-    pstrlen: u8 = 19,
-    pstr: [19]u8 = "BitTorrent protocol".*,
-    reserved: [8]u8 = std.mem.zeroes([8]u8),
-    info_hash: [20]u8 = undefined,
-    peer_id: [20]u8 = "-qB6666-weoiuv8324ns".*,
+pub const HandShake = extern struct {
+    // layout matters
+    pstrlen: u8 align(1) = 19,
+    pstr: [19]u8 align(1) = "BitTorrent protocol".*,
+    reserved: [8]u8 align(1) = std.mem.zeroes([8]u8),
+    info_hash: [20]u8 align(1) = undefined,
+    peer_id: [20]u8 align(1) = "-qB6666-weoiuv8324ns".*,
 
     pub fn createFromMeta(meta: MetaInfo) HandShake {
         return HandShake{
@@ -25,16 +26,6 @@ pub const HandShake = struct {
             .info_hash = buffer[28..48].*,
             .peer_id = buffer[48..68].*,
         };
-    }
-
-    pub fn dumpToWriter(self: @This(), writer: anytype) !void {
-        try writer.print("{c}{s}{s}{s}{s}", .{
-            self.pstrlen,
-            self.pstr,
-            self.reserved,
-            self.info_hash,
-            self.peer_id,
-        });
     }
 };
 
