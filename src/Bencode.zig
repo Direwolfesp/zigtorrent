@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 
 /// For sorting the key strings of the hash table
 const Ctx = struct {
-    map: std.StringArrayHashMap(BencodeValue),
+    map: std.StringArrayHashMap(Value),
     pub fn lessThan(self: @This(), a: usize, b: usize) bool {
         return std.mem.order(u8, self.map.keys()[a], self.map.keys()[b])
             .compare(.lt);
@@ -19,11 +19,11 @@ pub const ParseError = error{
     StringError,
 };
 
-pub const BencodeValue = union(enum) {
+pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
-    list: std.ArrayList(BencodeValue),
-    dict: std.StringArrayHashMap(BencodeValue),
+    list: std.ArrayList(Value),
+    dict: std.StringArrayHashMap(Value),
 
     /// Givan a Value -> JSON string
     pub fn format(
@@ -57,7 +57,7 @@ pub const BencodeValue = union(enum) {
                 var iter = dict.iterator();
                 var i: usize = 0;
                 while (iter.next()) |entry| : (i += 1) {
-                    const key = BencodeValue{ .string = entry.key_ptr.* };
+                    const key = Value{ .string = entry.key_ptr.* };
                     const val = entry.value_ptr.*;
                     try key.format(fmt, options, writer, true);
                     try writer.print(":", .{});
@@ -109,7 +109,7 @@ pub const BencodeValue = union(enum) {
                 var dict_len: usize = 2;
                 var iter = dict.iterator();
                 while (iter.next()) |entry| {
-                    const key = BencodeValue{ .string = entry.key_ptr.* };
+                    const key = Value{ .string = entry.key_ptr.* };
                     dict_len += try key.len() + try entry.value_ptr.len();
                 }
                 return dict_len;
@@ -140,7 +140,7 @@ pub const BencodeValue = union(enum) {
                 try string.append('d');
                 var it = dict.iterator();
                 while (it.next()) |kv| {
-                    const key = BencodeValue{ .string = kv.key_ptr.* };
+                    const key = Value{ .string = kv.key_ptr.* };
                     const val = kv.value_ptr.*;
                     try key.encodeBencode(string);
                     try val.encodeBencode(string);
@@ -152,7 +152,7 @@ pub const BencodeValue = union(enum) {
 }; // end BencodeValue
 
 /// Given a Bencoded string -> BencodeValue
-pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeValue {
+pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !Value {
     switch (encodedValue[0]) {
         '0'...'9' => {
             if (std.mem.indexOf(u8, encodedValue, ":")) |firstColon| {
@@ -179,7 +179,7 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeVal
             return ParseError.IntegerNotFound;
         },
         'l' => {
-            var decodedList = std.ArrayList(BencodeValue).init(allocator);
+            var decodedList = std.ArrayList(Value).init(allocator);
             errdefer decodedList.deinit();
 
             var i: usize = 1; // i points to the beginning of a Bencode Value
@@ -191,7 +191,7 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeVal
             return .{ .list = decodedList };
         },
         'd' => {
-            var decodedDict = std.StringArrayHashMap(BencodeValue).init(allocator);
+            var decodedDict = std.StringArrayHashMap(Value).init(allocator);
             errdefer decodedDict.deinit();
 
             var i: usize = 1;
@@ -217,8 +217,8 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !BencodeVal
 
 /// Owns the content from the file,
 /// thus requires freeing memory with deinit()
-pub const BencodeValueManaged = struct {
-    value: BencodeValue,
+pub const ValueManaged = struct {
+    value: Value,
     backing_buffer: []u8,
 
     pub fn deinit(self: *@This(), allocator: Allocator) void {
@@ -229,7 +229,7 @@ pub const BencodeValueManaged = struct {
 
 /// Parses a file and returns its decoded content.
 /// Requires freeing the underlaying buffer
-pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !BencodeValueManaged {
+pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !ValueManaged {
     var file: std.fs.File = try std.fs.cwd().openFile(path, .{});
     defer file.close();
     const content: []u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));

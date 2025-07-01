@@ -2,10 +2,11 @@ const std = @import("std");
 
 // Learn more about this file here: https://ziglang.org/learn/build-system
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
     const exe = b.addExecutable(.{
         .name = "main",
         .root_source_file = b.path("src/main.zig"),
-        .target = b.standardTargetOptions(.{}),
+        .target = target,
         .optimize = b.standardOptimizeOption(.{}),
     });
 

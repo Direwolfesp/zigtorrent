@@ -1,21 +1,20 @@
 const std = @import("std");
 const stdout = std.io.getStdOut().writer();
-const http = std.http;
 const File = std.fs.File;
 const Sha1 = std.crypto.hash.Sha1;
 
 const Bencode = @import("Bencode.zig");
-const BencodeValue = @import("Bencode.zig").BencodeValue;
-const BencodeValueManaged = @import("Bencode.zig").BencodeValueManaged;
-const HandShake = @import("Peer.zig").HandShake;
+const Peer = @import("Peer.zig");
+const HandShake = Peer.HandShake;
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
-const RequestParams = @import("Request.zig");
+const Tracker = @import("Tracker.zig");
 
 const Commands = enum {
     decode,
     info,
     peers,
     handshake,
+    download_piece,
 };
 
 pub fn main() !void {
@@ -26,7 +25,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 3) {
-        try stdout.print("Usage: your_bittorrent.zig <command> <args>\n", .{});
+        try stdout.print("Usage: ./program <command> <args>\n", .{});
         std.process.exit(1);
     }
     const cmd = std.meta.stringToEnum(Commands, args[1]).?;
@@ -43,82 +42,40 @@ pub fn main() !void {
         .info => {
             var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
             defer bencode.deinit(allocator);
-
-            var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(allocator, bencode.value);
+            const parsedMeta = try MetaInfo.init(allocator, bencode.value);
             try parsedMeta.printMetaInfo();
         },
         .peers => {
             var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
             defer bencode.deinit(allocator);
+            const meta = try MetaInfo.init(allocator, bencode.value);
 
-            var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(allocator, bencode.value);
+            var bodyDecoded = try Tracker.getResponse(allocator, meta);
+            defer bodyDecoded.deinit(allocator);
 
-            // request Params and create URI
-            var req_params = RequestParams.create(parsedMeta);
-            var queryBuf = std.ArrayList(u8).init(allocator);
-            defer queryBuf.deinit();
-            const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
-
-            // create client
-            var client = http.Client{ .allocator = allocator };
-            defer client.deinit();
-
-            // header buffer
-            const server_header_buff: []u8 = try allocator.alloc(u8, 1024);
-            defer allocator.free(server_header_buff);
-
-            var req: std.http.Client.Request = try client.open(.GET, uri, .{
-                .server_header_buffer = server_header_buff,
-            });
-            defer req.deinit();
-
-            // make request
-            try req.send();
-            try req.finish();
-            try req.wait();
-            if (req.response.status != .ok)
-                return error.RequestFailed;
-
-            // read the bencoded response body
-            const body: []u8 = try req.reader().readAllAlloc(
+            const peers: []std.net.Ip4Address = try Tracker.getPeersFromResponse(
                 allocator,
-                std.math.maxInt(usize),
+                bodyDecoded.value,
             );
-            defer allocator.free(body);
-
-            // decode response and print
-            const bodyDecoded: BencodeValue = try Bencode.decodeBencode(allocator, body);
-            const peers: []const u8 = bodyDecoded.dict.get("peers").?.string;
-            try printPeers(peers);
+            for (peers) |peer| try stdout.print("{}\n", .{peer});
         },
         .handshake => {
             if (args.len != 4) {
                 try stdout.print("Usage: $ ./program handshake <torrent> <peer_ip>:<peer_port>\n", .{});
                 std.process.exit(1);
             }
-            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
-            std.log.info("Parsed file {s}", .{args[2]});
-            defer bencode.deinit(allocator);
 
-            // create handshake
-            var parsedMeta: MetaInfo = undefined;
-            try parsedMeta.init(allocator, bencode.value);
-            const handshake = HandShake.createFromMeta(parsedMeta);
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            defer bencode.deinit(allocator);
+            const meta = try MetaInfo.init(allocator, bencode.value);
+            const handshake = HandShake.createFromMeta(meta);
             std.log.info("Created handshake struct", .{});
 
             // create ipv4 address
-            const address = args[3];
-            var it = std.mem.splitScalar(u8, address, ':');
-            const ip: []const u8 = it.first();
-            const port = it.next() orelse return error.MissingPort;
-            const addr = try std.net.Address.resolveIp(ip, try std.fmt.parseInt(u16, port, 10));
-            std.log.info("Peer ip: {?}", .{addr});
-
-            // connect to peer
+            const addr: std.net.Address = try parseAddressArg(args[3]);
             std.log.info("Trying to connect to peer...", .{});
             var connection = try std.net.tcpConnectToAddress(addr);
+            defer connection.close();
             std.log.info("Connected to peer", .{});
             const writer = connection.writer();
             const reader = connection.reader();
@@ -127,36 +84,43 @@ pub fn main() !void {
             std.log.info("Sending handshake to peer...", .{});
             try writer.writeStruct(handshake);
             std.log.info("Waiting for response...", .{});
-            const resp_handshake: HandShake = try reader.readStruct(HandShake);
+            const resp_handshake = try reader.readStruct(HandShake);
             std.log.info("Got a response from peer ", .{});
             const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
-            std.log.info("Peer ID: {s}", .{peer_id});
+            try stdout.print("Peer ID: {s}\n", .{peer_id});
+        },
+        .download_piece => {
+            if (args.len != 5) {
+                try stdout.print("Usage: ./program download_piece <output_file> <torrent> <piece_index>", .{});
+                return;
+            }
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            defer bencode.deinit(allocator);
+            const meta = try MetaInfo.init(allocator, bencode.value);
+
+            var bodyDecoded: Bencode.ValueManaged = try Tracker.getResponse(allocator, meta);
+            defer bodyDecoded.deinit(allocator);
+            // const peers: []const u8 = bodyDecoded.value.dict.get("peers").?.string;
+            // const peer = peers[0]; // we will just use the first peer
+            // _ = peer;
+            // const addres = parseAddresIpv4(peer);
         },
     }
 }
 
-// Just for the annoying nested '\n' to pass the tests
-fn print(val: BencodeValue, writer: anytype, nested: bool) !void {
-    try val.format("", .{}, writer, nested);
+/// Parses a slice of bytes to an Ipv4 address
+pub fn parseAddressArg(address: []const u8) !std.net.Address {
+    var it = std.mem.splitScalar(u8, address, ':');
+    const ip: []const u8 = it.first();
+    const port = try std.fmt.parseInt(u16, it.next().?, 10);
+    const res = try std.net.Address.resolveIp(ip, port);
+    std.log.info("Peer ip: {?}", .{res});
+    return res;
 }
 
-fn printPeers(peers: []const u8) !void {
-    var i: usize = 0;
-    while (i + 5 < peers.len) : (i += 6) {
-        const peer_ip = peers[i .. i + 4];
-        const peer_port: u16 = std.mem.readInt(
-            u16,
-            peers[i + 4 .. i + 6][0..2],
-            .big,
-        );
-        try stdout.print("{d}.{d}.{d}.{d}:{d}\n", .{
-            peer_ip[0],
-            peer_ip[1],
-            peer_ip[2],
-            peer_ip[3],
-            peer_port,
-        });
-    }
+/// Just for the annoying nested '\n' to pass the tests
+fn print(val: Bencode.Value, writer: anytype, nested: bool) !void {
+    try val.format("", .{}, writer, nested);
 }
 
 // Run all the test of the types that are attached to main
