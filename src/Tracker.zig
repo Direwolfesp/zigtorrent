@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Ip4Address = std.net.Ip4Address;
 const stdout = std.io.getStdOut().writer();
 
 const Bencode = @import("Bencode.zig");
@@ -115,7 +116,7 @@ pub fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueM
 
 /// Parses the peer ips from the response of the tracker.
 /// Caller owns the returned memory.
-pub fn getPeersFromResponse(allocator: std.mem.Allocator, response: Bencode.Value) ![]std.net.Ip4Address {
+pub fn getPeersFromResponse(allocator: std.mem.Allocator, response: Bencode.Value) ![]Ip4Address {
     const data_opt: ?[]const u8 = blk: {
         const peer: Bencode.Value = response.dict.get("peers") orelse return error.PeersNotFound;
         switch (peer) {
@@ -128,7 +129,7 @@ pub fn getPeersFromResponse(allocator: std.mem.Allocator, response: Bencode.Valu
     // Each address is 6 bytes.
     if (data_opt) |data| {
         if (data.len % 6 != 0) return error.InvalidPeers;
-        var peers = std.ArrayList(std.net.Ip4Address).init(allocator);
+        var peers = std.ArrayList(Ip4Address).init(allocator);
         defer peers.deinit();
 
         var i: usize = 0;

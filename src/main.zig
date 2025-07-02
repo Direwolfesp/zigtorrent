@@ -71,7 +71,7 @@ pub fn main() !void {
             const handshake = HandShake.createFromMeta(meta);
             std.log.info("Created handshake struct", .{});
 
-            // create ipv4 address
+            // Connect to peer
             const addr: std.net.Address = try parseAddressArg(args[3]);
             std.log.info("Trying to connect to peer...", .{});
             var connection = try std.net.tcpConnectToAddress(addr);
@@ -98,12 +98,29 @@ pub fn main() !void {
             defer bencode.deinit(allocator);
             const meta = try MetaInfo.init(allocator, bencode.value);
 
-            var bodyDecoded: Bencode.ValueManaged = try Tracker.getResponse(allocator, meta);
-            defer bodyDecoded.deinit(allocator);
-            // const peers: []const u8 = bodyDecoded.value.dict.get("peers").?.string;
-            // const peer = peers[0]; // we will just use the first peer
-            // _ = peer;
-            // const addres = parseAddresIpv4(peer);
+            var trckr_response: Bencode.ValueManaged = try Tracker.getResponse(allocator, meta);
+            defer trckr_response.deinit(allocator);
+
+            // we will just use the first peer for simplicity
+            const peers = try Tracker.getPeersFromResponse(allocator, trckr_response.value);
+            const peer = peers[0];
+
+            // conect to peer
+            var connection = try std.net.tcpConnectToAddress(peer);
+            defer connection.close();
+            std.log.info("Connected to peer", .{});
+            const writer = connection.writer();
+            const reader = connection.reader();
+
+            // send and receive handshake
+            std.log.info("Sending handshake to peer...", .{});
+            const handshake = HandShake.createFromMeta(meta);
+            try writer.writeStruct(handshake);
+            std.log.info("Waiting for response...", .{});
+            const resp_handshake = try reader.readStruct(HandShake);
+            std.log.info("Got a response from peer ", .{});
+            const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
+            try stdout.print("Peer ID: {s}\n", .{peer_id});
         },
     }
 }

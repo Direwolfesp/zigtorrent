@@ -19,7 +19,7 @@ pub const MetaInfo = struct {
     info: Info,
     info_hash: [Sha1.digest_length]u8,
 
-    // Info dictionary for single file
+    /// Info dictionary for single file
     const Info = struct {
         piece_length: i64,
         pieces: []const u8,

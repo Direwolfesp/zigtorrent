@@ -1,7 +1,14 @@
 const std = @import("std");
+const stdout = std.io.getStdOut().writer();
 const Allocator = std.mem.Allocator;
-
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
+const expectEqual = std.testing.expectEqual;
+const activeTag = std.meta.activeTag;
+const readInt = std.mem.readInt;
+//-----------------------------------------------------------------------------
+// BitTorrent Peer Messaging:
+// https://wiki.theory.org/BitTorrentSpecification#Peer_wire_protocol_.28TCP.29
+//-----------------------------------------------------------------------------
 
 pub const HandShake = extern struct {
     // layout matters
@@ -29,70 +36,177 @@ pub const HandShake = extern struct {
     }
 };
 
-test "createhandshake" {
-    // TODO
-    // Test converting bytes to HandShake and
-    // viceversa
-}
+/// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
+pub const Message = union(enum) {
+    const Self = @This();
 
-const MessageID = enum(u8) {
-    Choke = 0,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have,
-    Bitfield,
-    Request,
-    Piece,
-    Cancel,
-};
+    keep_alive: void, // len = 0
+    choke: void, // len = 1, ID = 0
+    unchoke: void, // len = 1, ID = 1
+    interested: void, // len = 1, ID = 2
+    not_interested: void, // len = 1, ID = 3
+    bitfield: []const u8, // len = 1 + X, ID = 5, bitfield
 
-pub const Message = struct {
-    msg_id: MessageID,
-    payload: []const u8,
+    // len = 5, ID = 4, piece_index
+    have: struct {
+        piece_index: u32,
+    },
+    // len = 9 + X, ID = 7, index,begin,block
+    piece: struct {
+        index: u32,
+        begin: u32,
+        block: []const u8, // usually 2^14 bytes
+    },
+    // len = 13, ID = 6, index,begin,end
+    request: struct {
+        index: u32,
+        begin: u32,
+        end: u32,
+    },
+    // len = 13, id = 8, index,begin,length
+    cancel: struct {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
 
-    // Serialized the message to a slice
-    // format: <id+payload len:u32><msg_id:u8><payload:[]u8>
-    // Result must be freed!
-    pub fn serialize(self: @This(), allocator: Allocator) ![]u8 {
-        var buff = try allocator.alloc(u8, self.payload.len + 4 + 1);
-
-        const size: u32 = @intCast(self.payload.len + 1);
-        buff[0..4].* = @bitCast(size);
-        buff[4] = @bitCast(@intFromEnum(self.msg_id));
-        @memcpy(buff[5..], self.payload);
-
-        return buff;
+    /// Creates a message from a given buffer.
+    /// Caller does not own the returned memory.
+    /// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
+    pub fn init(buff: []const u8) !Self {
+        const len: u32 = std.mem.readInt(u32, buff[0..4], .big);
+        return switch (len) {
+            0 => .keep_alive,
+            1 => {
+                const message_id: u8 = buff[4];
+                return switch (message_id) {
+                    0 => .choke,
+                    1 => .unchoke,
+                    2 => .interested,
+                    3 => .not_interested,
+                    else => MessageError.UnexpectedId,
+                };
+            },
+            5 => {
+                const message_id: u8 = buff[4];
+                return switch (message_id) {
+                    4 => .{ .have = .{ .piece_index = readInt(u32, buff[5..9], .big) } },
+                    else => MessageError.UnexpectedId,
+                };
+            },
+            13 => {
+                const message_id: u8 = buff[4];
+                return switch (message_id) {
+                    6 => .{
+                        .request = .{
+                            .index = readInt(u32, buff[5..9], .big),
+                            .begin = readInt(u32, buff[9..13], .big),
+                            .end = readInt(u32, buff[13..17], .big),
+                        },
+                    },
+                    8 => .{
+                        .cancel = .{
+                            .index = readInt(u32, buff[5..9], .big),
+                            .begin = readInt(u32, buff[9..13], .big),
+                            .length = readInt(u32, buff[13..17], .big),
+                        },
+                    },
+                    else => MessageError.UnexpectedId,
+                };
+            },
+            else => {
+                const message_id: u8 = buff[4];
+                return switch (message_id) {
+                    5 => .{
+                        .bitfield = buff[5 .. 5 + len - 1],
+                    },
+                    7 => .{
+                        .piece = .{
+                            .index = readInt(u32, buff[5..9], .big),
+                            .begin = readInt(u32, buff[9..13], .big),
+                            .block = buff[13 .. 13 + len - 9],
+                        },
+                    },
+                    else => MessageError.UnexpectedId,
+                };
+            },
+        };
     }
 };
 
-// Returns a valid message from a buffer
-// Used to parse peers payloads
-pub fn createMessage(buff: []const u8) MessageError!Message {
-    if (buff.len <= 5) return MessageError.InvalidMessageSize;
-    const payld_len: u32 = @bitCast(buff[0..4].*);
-    return .{
-        .msg_id = @enumFromInt(buff[4]),
-        .payload = buff[5..payld_len],
-    };
-}
-
 const MessageError = error{
-    InvalidMessageSize,
+    UnexpectedId,
 };
 
-test "message size" {
-    const t = std.testing;
-    const alloc = std.testing.allocator;
-
-    var msg: Message = .{ .msg_id = .Choke, .payload = "HELLO" };
-    const res = try msg.serialize(alloc);
-    defer alloc.free(res);
-
-    var msg2: Message = .{ .msg_id = .NotInterested, .payload = "LongerString" };
-    const res2 = try msg2.serialize(alloc);
-    defer alloc.free(res2);
-
-    try t.expectEqual(res.len, 4 + 1 + 5); // length is 10 bytes
-    try t.expectEqual(res2.len, 4 + 1 + 12); // length is 17 bytes
+test "message init" {
+    {
+        const buf = [_]u8{ 0, 0, 0, 0 };
+        const msg = try Message.init(&buf);
+        try expectEqual(.keep_alive, std.meta.activeTag(msg));
+    }
+    {
+        const buf = [_]u8{ 0, 0, 0, 1, 0 };
+        const msg = try Message.init(&buf);
+        try expectEqual(.choke, std.meta.activeTag(msg));
+    }
+    {
+        const buf = [_]u8{ 0, 0, 0, 1, 1 };
+        const msg = try Message.init(&buf);
+        try expectEqual(.unchoke, std.meta.activeTag(msg));
+    }
+    {
+        const buf = [_]u8{ 0, 0, 0, 1, 2 };
+        const msg = try Message.init(&buf);
+        try expectEqual(.interested, std.meta.activeTag(msg));
+    }
+    {
+        const buf = [_]u8{ 0, 0, 0, 1, 3 };
+        const msg = try Message.init(&buf);
+        try expectEqual(.not_interested, std.meta.activeTag(msg));
+    }
+    {
+        const buf = [_]u8{ 0, 0, 0, 5, 4, 0, 0, 0, 222 };
+        const msg = try Message.init(&buf);
+        try expectEqual(.have, std.meta.activeTag(msg));
+        try expectEqual(222, msg.have.piece_index);
+    }
+    {
+        const buf = [_]u8{
+            0, 0, 0, 13,
+            6,
+            0, 0, 4, 101, // index = 1125
+            0, 0, 11, 165, // begin = 2981
+            0, 0, 64, 164, // end = 16548
+        };
+        const msg = try Message.init(&buf);
+        try expectEqual(.request, std.meta.activeTag(msg));
+        try expectEqual(1125, msg.request.index);
+        try expectEqual(2981, msg.request.begin);
+        try expectEqual(16548, msg.request.end);
+    }
+    {
+        const buf = [_]u8{
+            0, 0, 0, 13,
+            8,
+            0, 0, 4, 101, // index = 1125
+            0, 0, 11, 165, // begin = 2981
+            0, 0, 64, 164, // end = 16548
+        };
+        const msg = try Message.init(&buf);
+        try expectEqual(.cancel, std.meta.activeTag(msg));
+        try expectEqual(1125, msg.cancel.index);
+        try expectEqual(2981, msg.cancel.begin);
+        try expectEqual(16548, msg.cancel.length);
+    }
+    {
+        const buf = [_]u8{
+            0, 0, 0, 6,
+            5,
+            0b01010001, 0, 0, 222, 0, // bitfield
+        };
+        const msg = try Message.init(&buf);
+        try expectEqual(.bitfield, std.meta.activeTag(msg));
+        try expectEqual(1, 1 & msg.bitfield[0]);
+        try expectEqual(0, 1 & msg.bitfield[1]);
+    }
 }
