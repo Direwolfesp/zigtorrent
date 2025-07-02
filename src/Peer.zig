@@ -132,6 +132,26 @@ pub const Message = union(enum) {
             },
         };
     }
+
+    /// Dumps the message to a designated writer
+    /// using the accoding memory layout
+    pub fn write(self: Self, writer: anytype) !void {
+        // TODO: use a generic writer to put messages
+        // see /usr/lib/zig/std/io.zig ln:292 for GenericWriter methods
+        _ = writer;
+        switch (self) {
+            .keep_alive => {},
+            .choke => {},
+            .unchoke => {},
+            .interested => {},
+            .not_interested => {},
+            .bitfield => {},
+            .have => {},
+            .piece => {},
+            .request => {},
+            .cancel => {},
+        }
+    }
 };
 
 const MessageError = error{

@@ -94,7 +94,7 @@ pub fn main() !void {
                 try stdout.print("Usage: ./program download_piece <output_file> <torrent> <piece_index>", .{});
                 return;
             }
-            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[3]);
             defer bencode.deinit(allocator);
             const meta = try MetaInfo.init(allocator, bencode.value);
 
@@ -106,7 +106,7 @@ pub fn main() !void {
             const peer = peers[0];
 
             // conect to peer
-            var connection = try std.net.tcpConnectToAddress(peer);
+            var connection = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer });
             defer connection.close();
             std.log.info("Connected to peer", .{});
             const writer = connection.writer();
