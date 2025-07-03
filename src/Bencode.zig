@@ -228,7 +228,7 @@ pub const ValueManaged = struct {
 };
 
 /// Parses a file and returns its decoded content.
-/// Requires freeing the underlaying buffer
+/// Caller owns the returned memory
 pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !ValueManaged {
     var file: std.fs.File = try std.fs.cwd().openFile(path, .{});
     defer file.close();

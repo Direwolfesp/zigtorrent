@@ -4,7 +4,9 @@ const Allocator = std.mem.Allocator;
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const expectEqual = std.testing.expectEqual;
 const activeTag = std.meta.activeTag;
+const intToEnum = std.meta.intToEnum;
 const readInt = std.mem.readInt;
+
 //-----------------------------------------------------------------------------
 // BitTorrent Peer Messaging:
 // https://wiki.theory.org/BitTorrentSpecification#Peer_wire_protocol_.28TCP.29
@@ -36,34 +38,43 @@ pub const HandShake = extern struct {
     }
 };
 
+const MessageID = enum(u8) {
+    Choke = 0,
+    Unchoke = 1,
+    Interested,
+    NotInterested,
+    Have,
+    Bitfield,
+    Request,
+    Piece,
+    Cancel,
+};
+
 /// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
+/// message_len = @sizeof(messageid) + @sizeof(payload).
 pub const Message = union(enum) {
     const Self = @This();
 
-    keep_alive: void, // len = 0
-    choke: void, // len = 1, ID = 0
-    unchoke: void, // len = 1, ID = 1
-    interested: void, // len = 1, ID = 2
-    not_interested: void, // len = 1, ID = 3
-    bitfield: []const u8, // len = 1 + X, ID = 5, bitfield
+    keep_alive: void, // no id, len = 0
+    choke: void,
+    unchoke: void,
+    interested: void,
+    not_interested: void,
+    bitfield: []const u8,
 
-    // len = 5, ID = 4, piece_index
     have: struct {
         piece_index: u32,
     },
-    // len = 9 + X, ID = 7, index,begin,block
     piece: struct {
         index: u32,
         begin: u32,
         block: []const u8, // usually 2^14 bytes
     },
-    // len = 13, ID = 6, index,begin,end
     request: struct {
         index: u32,
         begin: u32,
-        end: u32,
+        length: u32,
     },
-    // len = 13, id = 8, index,begin,length
     cancel: struct {
         index: u32,
         begin: u32,
@@ -74,37 +85,37 @@ pub const Message = union(enum) {
     /// Caller does not own the returned memory.
     /// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
     pub fn init(buff: []const u8) !Self {
-        const len: u32 = std.mem.readInt(u32, buff[0..4], .big);
+        const len: u32 = readInt(u32, buff[0..4], .big);
         return switch (len) {
             0 => .keep_alive,
             1 => {
-                const message_id: u8 = buff[4];
-                return switch (message_id) {
-                    0 => .choke,
-                    1 => .unchoke,
-                    2 => .interested,
-                    3 => .not_interested,
+                const msg_id = try intToEnum(MessageID, buff[4]);
+                return switch (msg_id) {
+                    .Choke => .choke,
+                    .Unchoke => .unchoke,
+                    .Interested => .interested,
+                    .NotInterested => .not_interested,
                     else => MessageError.UnexpectedId,
                 };
             },
             5 => {
-                const message_id: u8 = buff[4];
-                return switch (message_id) {
-                    4 => .{ .have = .{ .piece_index = readInt(u32, buff[5..9], .big) } },
+                const msg_id = try intToEnum(MessageID, buff[4]);
+                return switch (msg_id) {
+                    .Have => .{ .have = .{ .piece_index = readInt(u32, buff[5..9], .big) } },
                     else => MessageError.UnexpectedId,
                 };
             },
             13 => {
-                const message_id: u8 = buff[4];
-                return switch (message_id) {
-                    6 => .{
+                const msg_id = try intToEnum(MessageID, buff[4]);
+                return switch (msg_id) {
+                    .Request => .{
                         .request = .{
                             .index = readInt(u32, buff[5..9], .big),
                             .begin = readInt(u32, buff[9..13], .big),
-                            .end = readInt(u32, buff[13..17], .big),
+                            .length = readInt(u32, buff[13..17], .big),
                         },
                     },
-                    8 => .{
+                    .Cancel => .{
                         .cancel = .{
                             .index = readInt(u32, buff[5..9], .big),
                             .begin = readInt(u32, buff[9..13], .big),
@@ -115,12 +126,12 @@ pub const Message = union(enum) {
                 };
             },
             else => {
-                const message_id: u8 = buff[4];
-                return switch (message_id) {
-                    5 => .{
+                const msg_id = try intToEnum(MessageID, buff[4]);
+                return switch (msg_id) {
+                    .Bitfield => .{
                         .bitfield = buff[5 .. 5 + len - 1],
                     },
-                    7 => .{
+                    .Piece => .{
                         .piece = .{
                             .index = readInt(u32, buff[5..9], .big),
                             .begin = readInt(u32, buff[9..13], .big),
@@ -136,20 +147,57 @@ pub const Message = union(enum) {
     /// Dumps the message to a designated writer
     /// using the accoding memory layout
     pub fn write(self: Self, writer: anytype) !void {
-        // TODO: use a generic writer to put messages
-        // see /usr/lib/zig/std/io.zig ln:292 for GenericWriter methods
-        _ = writer;
         switch (self) {
-            .keep_alive => {},
-            .choke => {},
-            .unchoke => {},
-            .interested => {},
-            .not_interested => {},
-            .bitfield => {},
-            .have => {},
-            .piece => {},
-            .request => {},
-            .cancel => {},
+            .keep_alive => {
+                writer.writeInt(u32, 0, .big);
+            },
+            .choke => {
+                writer.writeInt(u32, 1, .big);
+                writer.writeByte(MessageID.Choke);
+            },
+            .unchoke => {
+                writer.writeInt(u32, 1, .big);
+                writer.writeByte(MessageID.Unchoke);
+            },
+            .interested => {
+                writer.writeInt(u32, 1, .big);
+                writer.writeByte(MessageID.Interested);
+            },
+            .not_interested => {
+                writer.writeInt(u32, 1, .big);
+                writer.writeByte(MessageID.NotInterested);
+            },
+            .bitfield => |slice| {
+                writer.writeInt(u32, slice.len + 1, .big);
+                writer.writeByte(MessageID.Bitfield);
+                writer.writeAll(slice);
+            },
+            .have => |have| {
+                writer.writeInt(u32, 5, .big);
+                writer.writeByte(MessageID.Have);
+                writer.writeInt(u32, have.piece_index, .big);
+            },
+            .piece => |piece| {
+                writer.writeInt(u32, 9 + piece.block.len, .big);
+                writer.writeByte(MessageID.Piece);
+                writer.writeInt(u32, piece.index, .big);
+                writer.writeInt(u32, piece.begin, .big);
+                writer.writeAll(piece.block);
+            },
+            .request => |request| {
+                writer.writeInt(u32, 13, .big);
+                writer.writeByte(MessageID.Request);
+                writer.writeInt(u32, request.index, .big);
+                writer.writeInt(u32, request.begin, .big);
+                writer.writeInt(u32, request.length, .big);
+            },
+            .cancel => |cancel| {
+                writer.writeInt(u32, 13, .big);
+                writer.writeByte(MessageID.Cancel);
+                writer.writeInt(u32, cancel.index, .big);
+                writer.writeInt(u32, cancel.begin, .big);
+                writer.writeInt(u32, cancel.length, .big);
+            },
         }
     }
 };
@@ -196,13 +244,13 @@ test "message init" {
             6,
             0, 0, 4, 101, // index = 1125
             0, 0, 11, 165, // begin = 2981
-            0, 0, 64, 164, // end = 16548
+            0, 0, 64, 164, // length = 16548
         };
         const msg = try Message.init(&buf);
         try expectEqual(.request, std.meta.activeTag(msg));
         try expectEqual(1125, msg.request.index);
         try expectEqual(2981, msg.request.begin);
-        try expectEqual(16548, msg.request.end);
+        try expectEqual(16548, msg.request.length);
     }
     {
         const buf = [_]u8{
