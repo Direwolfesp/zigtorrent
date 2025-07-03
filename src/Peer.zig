@@ -3,6 +3,7 @@ const stdout = std.io.getStdOut().writer();
 const Allocator = std.mem.Allocator;
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 const activeTag = std.meta.activeTag;
 const intToEnum = std.meta.intToEnum;
 const readInt = std.mem.readInt;
@@ -144,59 +145,64 @@ pub const Message = union(enum) {
         };
     }
 
+    /// little hack to cast usize to u32 :3
+    pub fn @"u32"(x: usize) u32 {
+        return @intCast(x);
+    }
+
     /// Dumps the message to a designated writer
     /// using the accoding memory layout
     pub fn write(self: Self, writer: anytype) !void {
         switch (self) {
             .keep_alive => {
-                writer.writeInt(u32, 0, .big);
+                try writer.writeInt(u32, 0, .big);
             },
             .choke => {
-                writer.writeInt(u32, 1, .big);
-                writer.writeByte(MessageID.Choke);
+                try writer.writeInt(u32, 1, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Choke));
             },
             .unchoke => {
-                writer.writeInt(u32, 1, .big);
-                writer.writeByte(MessageID.Unchoke);
+                try writer.writeInt(u32, 1, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Unchoke));
             },
             .interested => {
-                writer.writeInt(u32, 1, .big);
-                writer.writeByte(MessageID.Interested);
+                try writer.writeInt(u32, 1, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Interested));
             },
             .not_interested => {
-                writer.writeInt(u32, 1, .big);
-                writer.writeByte(MessageID.NotInterested);
+                try writer.writeInt(u32, 1, .big);
+                try writer.writeByte(@intFromEnum(MessageID.NotInterested));
             },
             .bitfield => |slice| {
-                writer.writeInt(u32, slice.len + 1, .big);
-                writer.writeByte(MessageID.Bitfield);
-                writer.writeAll(slice);
+                try writer.writeInt(u32, @"u32"(slice.len) + 1, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Bitfield));
+                try writer.writeAll(slice);
             },
             .have => |have| {
-                writer.writeInt(u32, 5, .big);
-                writer.writeByte(MessageID.Have);
-                writer.writeInt(u32, have.piece_index, .big);
+                try writer.writeInt(u32, 5, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Have));
+                try writer.writeInt(u32, have.piece_index, .big);
             },
             .piece => |piece| {
-                writer.writeInt(u32, 9 + piece.block.len, .big);
-                writer.writeByte(MessageID.Piece);
-                writer.writeInt(u32, piece.index, .big);
-                writer.writeInt(u32, piece.begin, .big);
-                writer.writeAll(piece.block);
+                try writer.writeInt(u32, 9 + @"u32"(piece.block.len), .big);
+                try writer.writeByte(@intFromEnum(MessageID.Piece));
+                try writer.writeInt(u32, piece.index, .big);
+                try writer.writeInt(u32, piece.begin, .big);
+                try writer.writeAll(piece.block);
             },
             .request => |request| {
-                writer.writeInt(u32, 13, .big);
-                writer.writeByte(MessageID.Request);
-                writer.writeInt(u32, request.index, .big);
-                writer.writeInt(u32, request.begin, .big);
-                writer.writeInt(u32, request.length, .big);
+                try writer.writeInt(u32, 13, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Request));
+                try writer.writeInt(u32, request.index, .big);
+                try writer.writeInt(u32, request.begin, .big);
+                try writer.writeInt(u32, request.length, .big);
             },
             .cancel => |cancel| {
-                writer.writeInt(u32, 13, .big);
-                writer.writeByte(MessageID.Cancel);
-                writer.writeInt(u32, cancel.index, .big);
-                writer.writeInt(u32, cancel.begin, .big);
-                writer.writeInt(u32, cancel.length, .big);
+                try writer.writeInt(u32, 13, .big);
+                try writer.writeByte(@intFromEnum(MessageID.Cancel));
+                try writer.writeInt(u32, cancel.index, .big);
+                try writer.writeInt(u32, cancel.begin, .big);
+                try writer.writeInt(u32, cancel.length, .big);
             },
         }
     }
@@ -276,5 +282,25 @@ test "message init" {
         try expectEqual(.bitfield, std.meta.activeTag(msg));
         try expectEqual(1, 1 & msg.bitfield[0]);
         try expectEqual(0, 1 & msg.bitfield[1]);
+    }
+}
+
+test "round trip" {
+    {
+        const buf = [_]u8{
+            0, 0, 0, 6,
+            5,
+            0b01010001, 0, 0, 222, 0, // bitfield
+        };
+        const msg = try Message.init(&buf);
+        var res = std.ArrayList(u8).init(std.testing.allocator);
+        defer res.deinit();
+        const writer = res.writer();
+        try msg.write(writer);
+
+        const actual = try res.toOwnedSlice();
+        defer std.testing.allocator.free(actual);
+
+        try expectEqualSlices(u8, &buf, actual);
     }
 }
