@@ -5,6 +5,8 @@ const Sha1 = std.crypto.hash.Sha1;
 
 const Bencode = @import("Bencode.zig");
 const Peer = @import("Peer.zig");
+const Message = Peer.Message;
+const MessageError = Peer.MessageError;
 const HandShake = Peer.HandShake;
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const Tracker = @import("Tracker.zig");
@@ -113,14 +115,24 @@ pub fn main() !void {
             const reader = connection.reader();
 
             // send and receive handshake
-            std.log.info("Sending handshake to peer...", .{});
             const handshake = HandShake.createFromMeta(meta);
             try writer.writeStruct(handshake);
-            std.log.info("Waiting for response...", .{});
-            const resp_handshake = try reader.readStruct(HandShake);
-            std.log.info("Got a response from peer ", .{});
-            const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
-            try stdout.print("Peer ID: {s}\n", .{peer_id});
+            _ = try reader.readStruct(HandShake);
+
+            const msg = try Message.init(allocator, reader);
+            defer msg.deinit(allocator);
+
+            if (msg != .bitfield)
+                return MessageError.Invalid;
+
+            const int: Message = .interested;
+            try int.write(writer);
+
+            const unchk = try Message.init(allocator, reader);
+            defer unchk.deinit(allocator);
+
+            if (unchk != .unchoke)
+                return MessageError.Invalid;
         },
     }
 }

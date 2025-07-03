@@ -82,16 +82,22 @@ pub const Message = union(enum) {
         length: u32,
     },
 
-    /// Creates a message from a given buffer.
-    /// Caller does not own the returned memory.
+    /// Creates a message from a given `reader`.
+    /// Caller owns the returned memory, must call deinit()
     /// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
-    pub fn init(buff: []const u8) !Self {
-        const len: u32 = readInt(u32, buff[0..4], .big);
+    pub fn init(allocator: Allocator, reader: anytype) !Self {
+        const len: u32 = try reader.readInt(u32, .big);
+        const msg_id: ?MessageID = if (len > 0) try reader.readEnum(MessageID, .big) else null;
+        const payload: ?[]u8 = if (len > 1) try allocator.alloc(u8, len - 1) else null;
+
+        // copy the payload into the buffer
+        if (payload) |p| try reader.readNoEof(p);
+        defer if (payload) |p| allocator.free(p);
+
         return switch (len) {
             0 => .keep_alive,
             1 => {
-                const msg_id = try intToEnum(MessageID, buff[4]);
-                return switch (msg_id) {
+                return switch (msg_id.?) {
                     .Choke => .choke,
                     .Unchoke => .unchoke,
                     .Interested => .interested,
@@ -100,43 +106,40 @@ pub const Message = union(enum) {
                 };
             },
             5 => {
-                const msg_id = try intToEnum(MessageID, buff[4]);
-                return switch (msg_id) {
-                    .Have => .{ .have = .{ .piece_index = readInt(u32, buff[5..9], .big) } },
+                return switch (msg_id.?) {
+                    .Have => .{ .have = .{ .piece_index = readInt(u32, payload.?[0..4], .big) } },
                     else => MessageError.UnexpectedId,
                 };
             },
             13 => {
-                const msg_id = try intToEnum(MessageID, buff[4]);
-                return switch (msg_id) {
+                return switch (msg_id.?) {
                     .Request => .{
                         .request = .{
-                            .index = readInt(u32, buff[5..9], .big),
-                            .begin = readInt(u32, buff[9..13], .big),
-                            .length = readInt(u32, buff[13..17], .big),
+                            .index = readInt(u32, payload.?[0..4], .big),
+                            .begin = readInt(u32, payload.?[4..8], .big),
+                            .length = readInt(u32, payload.?[8..12], .big),
                         },
                     },
                     .Cancel => .{
                         .cancel = .{
-                            .index = readInt(u32, buff[5..9], .big),
-                            .begin = readInt(u32, buff[9..13], .big),
-                            .length = readInt(u32, buff[13..17], .big),
+                            .index = readInt(u32, payload.?[0..4], .big),
+                            .begin = readInt(u32, payload.?[4..8], .big),
+                            .length = readInt(u32, payload.?[8..12], .big),
                         },
                     },
                     else => MessageError.UnexpectedId,
                 };
             },
             else => {
-                const msg_id = try intToEnum(MessageID, buff[4]);
-                return switch (msg_id) {
+                return switch (msg_id.?) {
                     .Bitfield => .{
-                        .bitfield = buff[5 .. 5 + len - 1],
+                        .bitfield = try allocator.dupe(u8, payload.?),
                     },
                     .Piece => .{
                         .piece = .{
-                            .index = readInt(u32, buff[5..9], .big),
-                            .begin = readInt(u32, buff[9..13], .big),
-                            .block = buff[13 .. 13 + len - 9],
+                            .index = readInt(u32, payload.?[0..4], .big),
+                            .begin = readInt(u32, payload.?[4..8], .big),
+                            .block = try allocator.dupe(u8, payload.?[8..]),
                         },
                     },
                     else => MessageError.UnexpectedId,
@@ -145,8 +148,17 @@ pub const Message = union(enum) {
         };
     }
 
+    /// Frees the corresponding payload if necessary
+    pub fn deinit(self: Self, allocator: Allocator) void {
+        switch (self) {
+            .bitfield => |bitf| allocator.free(bitf),
+            .piece => |piece| allocator.free(piece.block),
+            else => {},
+        }
+    }
+
     /// little hack to cast usize to u32 :3
-    pub fn @"u32"(x: usize) u32 {
+    fn @"u32"(x: usize) u32 {
         return @intCast(x);
     }
 
@@ -208,77 +220,106 @@ pub const Message = union(enum) {
     }
 };
 
-const MessageError = error{
+pub const MessageError = error{
     UnexpectedId,
+    Invalid,
 };
 
 test "message init" {
+    const allocator = std.testing.allocator;
     {
-        const buf = [_]u8{ 0, 0, 0, 0 };
-        const msg = try Message.init(&buf);
+        const buffer = [_]u8{ 0, 0, 0, 0 };
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.keep_alive, std.meta.activeTag(msg));
     }
     {
-        const buf = [_]u8{ 0, 0, 0, 1, 0 };
-        const msg = try Message.init(&buf);
+        const buffer = [_]u8{ 0, 0, 0, 1, 0 };
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.choke, std.meta.activeTag(msg));
     }
     {
-        const buf = [_]u8{ 0, 0, 0, 1, 1 };
-        const msg = try Message.init(&buf);
+        const buffer = [_]u8{ 0, 0, 0, 1, 1 };
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.unchoke, std.meta.activeTag(msg));
     }
     {
-        const buf = [_]u8{ 0, 0, 0, 1, 2 };
-        const msg = try Message.init(&buf);
+        const buffer = [_]u8{ 0, 0, 0, 1, 2 };
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.interested, std.meta.activeTag(msg));
     }
     {
-        const buf = [_]u8{ 0, 0, 0, 1, 3 };
-        const msg = try Message.init(&buf);
+        const buffer = [_]u8{ 0, 0, 0, 1, 3 };
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.not_interested, std.meta.activeTag(msg));
     }
     {
-        const buf = [_]u8{ 0, 0, 0, 5, 4, 0, 0, 0, 222 };
-        const msg = try Message.init(&buf);
+        const buffer = [_]u8{ 0, 0, 0, 5, 4, 0, 0, 0, 222 };
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.have, std.meta.activeTag(msg));
         try expectEqual(222, msg.have.piece_index);
     }
     {
-        const buf = [_]u8{
+        const buffer = [_]u8{
             0, 0, 0, 13,
             6,
             0, 0, 4, 101, // index = 1125
             0, 0, 11, 165, // begin = 2981
             0, 0, 64, 164, // length = 16548
         };
-        const msg = try Message.init(&buf);
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.request, std.meta.activeTag(msg));
         try expectEqual(1125, msg.request.index);
         try expectEqual(2981, msg.request.begin);
         try expectEqual(16548, msg.request.length);
     }
     {
-        const buf = [_]u8{
+        const buffer = [_]u8{
             0, 0, 0, 13,
             8,
             0, 0, 4, 101, // index = 1125
             0, 0, 11, 165, // begin = 2981
             0, 0, 64, 164, // end = 16548
         };
-        const msg = try Message.init(&buf);
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.cancel, std.meta.activeTag(msg));
         try expectEqual(1125, msg.cancel.index);
         try expectEqual(2981, msg.cancel.begin);
         try expectEqual(16548, msg.cancel.length);
     }
     {
-        const buf = [_]u8{
+        const buffer = [_]u8{
             0, 0, 0, 6,
             5,
             0b01010001, 0, 0, 222, 0, // bitfield
         };
-        const msg = try Message.init(&buf);
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(allocator, reader);
+        defer msg.deinit(allocator);
         try expectEqual(.bitfield, std.meta.activeTag(msg));
         try expectEqual(1, 1 & msg.bitfield[0]);
         try expectEqual(0, 1 & msg.bitfield[1]);
@@ -286,21 +327,29 @@ test "message init" {
 }
 
 test "round trip" {
+    const t_allocator = std.testing.allocator;
     {
-        const buf = [_]u8{
+        const buffer = [_]u8{
             0, 0, 0, 6,
             5,
             0b01010001, 0, 0, 222, 0, // bitfield
         };
-        const msg = try Message.init(&buf);
-        var res = std.ArrayList(u8).init(std.testing.allocator);
+
+        // read message from buffer
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        const msg = try Message.init(t_allocator, reader);
+        defer msg.deinit(t_allocator);
+
+        // write message to new buffer
+        var res = std.ArrayList(u8).init(t_allocator);
         defer res.deinit();
         const writer = res.writer();
         try msg.write(writer);
 
-        const actual = try res.toOwnedSlice();
-        defer std.testing.allocator.free(actual);
-
-        try expectEqualSlices(u8, &buf, actual);
+        // they should be the same
+        const actual: []const u8 = try res.toOwnedSlice();
+        defer t_allocator.free(actual);
+        try expectEqualSlices(u8, &buffer, actual);
     }
 }
