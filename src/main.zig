@@ -165,23 +165,35 @@ pub fn main() !void {
             if (unchk != .unchoke) return MessageError.Invalid;
             std.log.info("Received 'unchoke'", .{});
 
-            const piece_length: u32 = @intCast(meta.info.piece_length);
+            // calculate the piece length according to the index,
+            // the last index might get a piece smaller than the other pieces
+            // this is only necesary one per piece
+            const num_full_pieces = try std.math.divFloor(
+                i64,
+                meta.info.length,
+                meta.info.piece_length,
+            );
+            const piece_length: i64 = if (p_piece_index < num_full_pieces)
+                meta.info.piece_length
+            else
+                meta.info.length - num_full_pieces * meta.info.piece_length;
+
             var piece_byte_index: u32 = 0;
             const block_length: u32 = 16 * 1024;
             var res = std.ArrayList(u8).init(allocator);
             defer res.deinit();
-            try res.ensureTotalCapacityPrecise(piece_length);
+            try res.ensureTotalCapacityPrecise(@intCast(piece_length));
 
             // while we havent download the piece yet
             while (piece_byte_index != piece_length) {
-                const left: u32 = piece_length - piece_byte_index;
-                const bytes: u32 = if (left >= block_length) block_length else left;
+                const left = piece_length - piece_byte_index;
+                const bytes = if (left >= block_length) block_length else left;
 
                 const request: Message = .{
                     .request = .{
                         .index = p_piece_index,
                         .begin = piece_byte_index,
-                        .length = bytes,
+                        .length = @intCast(bytes),
                     },
                 };
 
@@ -206,11 +218,11 @@ pub fn main() !void {
                 std.debug.assert(read.piece.block.len == bytes);
 
                 try res.appendSlice(read.piece.block);
-                piece_byte_index += bytes;
+                piece_byte_index += @intCast(bytes);
 
                 try stdout.print("Progress: {} of {} for this piece\r", .{
                     std.fmt.fmtIntSizeDec(piece_byte_index),
-                    std.fmt.fmtIntSizeDec(piece_length),
+                    std.fmt.fmtIntSizeDec(@intCast(piece_length)),
                 });
             }
             try stdout.print("\n", .{});
