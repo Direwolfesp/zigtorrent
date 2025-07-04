@@ -198,14 +198,7 @@ pub fn main() !void {
                 };
 
                 // request block
-                request.write(conn_writer) catch |err| {
-                    try stderr.print(
-                        \\Bad request for piece_index: {}, block byte start: {},
-                        \\requested length: {}
-                        \\Error: {?}
-                    , .{ p_piece_index, piece_byte_index, bytes, err });
-                    return;
-                };
+                try request.write(conn_writer);
 
                 // wait for the piece message
                 const read = try Message.init(allocator, conn_reader);
