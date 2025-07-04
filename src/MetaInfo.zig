@@ -21,8 +21,11 @@ pub const MetaInfo = struct {
 
     /// Info dictionary for single file
     const Info = struct {
+        /// number of bytes in each piece
         piece_length: i64,
+        /// concatenation of all 20-byte SHA1 hash values, one per piece
         pieces: []const u8,
+        /// length of the file in bytes
         length: i64,
     };
 

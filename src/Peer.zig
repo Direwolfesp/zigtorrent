@@ -1,12 +1,14 @@
 const std = @import("std");
-const stdout = std.io.getStdOut().writer();
 const Allocator = std.mem.Allocator;
-const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
 const activeTag = std.meta.activeTag;
 const intToEnum = std.meta.intToEnum;
 const readInt = std.mem.readInt;
+
+const MetaInfo = @import("MetaInfo.zig").MetaInfo;
+
+const stdout = std.io.getStdOut().writer();
 
 //-----------------------------------------------------------------------------
 // BitTorrent Peer Messaging:
@@ -72,8 +74,11 @@ pub const Message = union(enum) {
         block: []const u8, // usually 2^14 bytes
     },
     request: struct {
+        /// zero-based piece index
         index: u32,
+        /// zero-based byte offset within the piece
         begin: u32,
+        /// requested length.
         length: u32,
     },
     cancel: struct {
