@@ -11,6 +11,7 @@ const HandShake = Peer.HandShake;
 const Tracker = @import("Tracker.zig");
 
 const stdout = std.io.getStdOut().writer();
+const stderr = std.io.getStdErr().writer();
 
 const Commands = enum {
     decode,
@@ -152,11 +153,13 @@ pub fn main() !void {
             const block_length: u32 = 16 * 1024;
             var res = std.ArrayList(u8).init(allocator);
             defer res.deinit();
+            try res.ensureTotalCapacityPrecise(piece_length);
 
             // while we havent download the piece yet
             while (piece_byte_index != piece_length) {
                 const left: u32 = piece_length - piece_byte_index;
                 const bytes: u32 = if (left >= block_length) block_length else left;
+
                 const request: Message = .{
                     .request = .{
                         .index = p_piece_index,
@@ -167,7 +170,7 @@ pub fn main() !void {
 
                 // request block
                 request.write(conn_writer) catch |err| {
-                    try stdout.print(
+                    try stderr.print(
                         \\Bad request for piece_index: {}, block byte start: {},
                         \\requested length: {}
                         \\Error: {?}
