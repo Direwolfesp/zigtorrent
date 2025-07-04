@@ -194,13 +194,11 @@ pub fn main() !void {
                     , .{ p_piece_index, piece_byte_index, bytes, err });
                     return;
                 };
-                std.log.info("Sent 'request'", .{});
 
                 // wait for the piece message
                 const read = try Message.init(allocator, conn_reader);
                 defer read.deinit(allocator);
                 if (read != .piece) return MessageError.Invalid;
-                std.log.info("Received 'piece'", .{});
 
                 // we should've got what we requested
                 std.debug.assert(read.piece.index == p_piece_index);
@@ -210,12 +208,12 @@ pub fn main() !void {
                 try res.appendSlice(read.piece.block);
                 piece_byte_index += bytes;
 
-                std.log.info("Received {}", .{std.fmt.fmtIntSizeDec(bytes)});
-                std.log.info("Progress: {} of {} for this piece", .{
+                try stdout.print("Progress: {} of {} for this piece\r", .{
                     std.fmt.fmtIntSizeDec(piece_byte_index),
                     std.fmt.fmtIntSizeDec(piece_length),
                 });
             }
+            try stdout.print("\n", .{});
 
             // check piece integrity
             var sha1 = Sha1.init(.{});
@@ -223,9 +221,9 @@ pub fn main() !void {
             const piece_hash = sha1.finalResult();
             const start_index = p_piece_index * 20;
             if (std.mem.eql(u8, &piece_hash, meta.info.pieces[start_index .. start_index + 20])) {
-                std.log.info("Piece SHA1 hash verified correctly", .{});
+                try stdout.print("Piece SHA1 hash verified correctly\n", .{});
             } else {
-                std.log.err("Piece SHA1 hash failed", .{});
+                try stderr.print("Piece SHA1 hash failed\n", .{});
             }
 
             // store piece in file
@@ -233,7 +231,7 @@ pub fn main() !void {
             defer file.close();
             const file_writer = file.writer();
             try file_writer.writeAll(res.items);
-            std.log.info("Piece contents written into file '{s}'", .{p_ofile});
+            try stdout.print("Piece contents written into file '{s}'", .{p_ofile});
         },
         .help => {
             try Commands.printHelp();
