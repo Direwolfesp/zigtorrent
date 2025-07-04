@@ -14,11 +14,26 @@ const stdout = std.io.getStdOut().writer();
 const stderr = std.io.getStdErr().writer();
 
 const Commands = enum {
+    help,
     decode,
     info,
     peers,
     handshake,
     download_piece,
+
+    const help_str =
+        \\Usage:
+        \\   ./program help
+        \\   ./program decode <bencoded_string>
+        \\   ./program info <torrent>
+        \\   ./program peers <torrent>
+        \\   ./program handshake <torrent> <peer_ip>:<peer_port>
+        \\   ./program download_piece <output_file> <torrent> <piece_index>
+    ;
+
+    pub fn printHelp() !void {
+        try stdout.print("{s}\n", .{help_str});
+    }
 };
 
 pub fn main() !void {
@@ -28,11 +43,22 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 3) {
-        try stdout.print("Usage: ./program <command> <args>\n", .{});
+    if (args.len < 2) {
+        try Commands.printHelp();
         std.process.exit(1);
     }
-    const cmd = std.meta.stringToEnum(Commands, args[1]).?;
+
+    const cmd = std.meta.stringToEnum(Commands, args[1]) orelse Commands.help;
+    if (switch (cmd) {
+        .decode, .info, .peers => args.len != 3,
+        .handshake => args.len != 4,
+        .download_piece => args.len != 5,
+        else => args.len != 2,
+    }) {
+        try Commands.printHelp();
+        std.process.exit(1);
+    }
+
     switch (cmd) {
         .decode => {
             const encodedStr = args[2];
@@ -64,11 +90,6 @@ pub fn main() !void {
             for (peers) |peer| try stdout.print("{}\n", .{peer});
         },
         .handshake => {
-            if (args.len != 4) {
-                try stdout.print("Usage: $ ./program handshake <torrent> <peer_ip>:<peer_port>\n", .{});
-                std.process.exit(1);
-            }
-
             var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
             defer bencode.deinit(allocator);
             const meta = try MetaInfo.init(allocator, bencode.value);
@@ -94,10 +115,6 @@ pub fn main() !void {
             try stdout.print("Peer ID: {s}\n", .{peer_id});
         },
         .download_piece => {
-            if (args.len != 5) {
-                try stdout.print("Usage: ./program download_piece <output_file> <torrent> <piece_index>", .{});
-                return;
-            }
             const p_torrent = args[3];
             const p_ofile = args[2];
             const p_piece_index: u32 = try std.fmt.parseInt(u32, args[4], 10);
@@ -217,6 +234,9 @@ pub fn main() !void {
             const file_writer = file.writer();
             try file_writer.writeAll(res.items);
             std.log.info("Piece contents written into file '{s}'", .{p_ofile});
+        },
+        .help => {
+            try Commands.printHelp();
         },
     }
 }
