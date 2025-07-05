@@ -9,6 +9,7 @@ const readInt = std.mem.readInt;
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
 
 const stdout = std.io.getStdOut().writer();
+const stderr = std.io.getStdErr().writer();
 
 //-----------------------------------------------------------------------------
 // BitTorrent Peer Messaging:
@@ -229,6 +230,75 @@ pub const MessageError = error{
     UnexpectedId,
     Invalid,
 };
+
+/// Temporary function, might get reworked, i dont really like it
+pub fn downloadPiece(
+    allocator: Allocator,
+    meta: MetaInfo,
+    conn: std.net.Stream,
+    piece_index: u32,
+    res: *std.ArrayList(u8),
+) !bool {
+    // calculate the piece length according to the index,
+    // the last index might get a piece smaller than the other pieces
+    // this is only necesary one per piece
+    const num_whole_pieces = try std.math.divFloor(
+        i64,
+        meta.info.length,
+        meta.info.piece_length,
+    );
+    const piece_length: i64 = if (piece_index < num_whole_pieces)
+        meta.info.piece_length
+    else
+        meta.info.length - num_whole_pieces * meta.info.piece_length;
+
+    var piece_byte_index: u32 = 0;
+    const block_length: u32 = 16 * 1024;
+    try res.ensureTotalCapacityPrecise(@intCast(piece_length));
+    res.clearRetainingCapacity();
+
+    // while we havent download the piece yet
+    while (piece_byte_index != piece_length) {
+        const left = piece_length - piece_byte_index;
+        const bytes = if (left >= block_length) block_length else left;
+
+        const request: Message = .{
+            .request = .{
+                .index = piece_index,
+                .begin = piece_byte_index,
+                .length = @intCast(bytes),
+            },
+        };
+
+        // request block
+        try request.write(conn.writer());
+
+        // wait for the piece message
+        const read = try Message.init(allocator, conn.reader());
+        defer read.deinit(allocator);
+        if (read != .piece) return MessageError.Invalid;
+
+        // we should've got what we requested
+        std.debug.assert(read.piece.index == piece_index);
+        std.debug.assert(read.piece.begin == piece_byte_index);
+        std.debug.assert(read.piece.block.len == bytes);
+
+        try res.appendSlice(read.piece.block);
+        piece_byte_index += @intCast(bytes);
+    }
+
+    // check piece integrity
+    var sha1 = std.crypto.hash.Sha1.init(.{});
+    sha1.update(res.items);
+    const piece_hash = sha1.finalResult();
+    const start_index = piece_index * 20;
+    if (std.mem.eql(u8, &piece_hash, meta.info.pieces[start_index .. start_index + 20])) {
+        return true;
+    } else {
+        try stderr.print("Piece SHA1 hash failed\n", .{});
+        return false;
+    }
+}
 
 test "message init" {
     const allocator = std.testing.allocator;

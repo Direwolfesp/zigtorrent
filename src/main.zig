@@ -20,6 +20,7 @@ const Commands = enum {
     peers,
     handshake,
     download_piece,
+    download,
 
     const help_str =
         \\Usage:
@@ -29,6 +30,7 @@ const Commands = enum {
         \\   ./program peers <torrent>
         \\   ./program handshake <torrent> <peer_ip>:<peer_port>
         \\   ./program download_piece <output_file> <torrent> <piece_index>
+        \\   ./program download <output_file> <torrent>
     ;
 
     pub fn printHelp() !void {
@@ -51,7 +53,7 @@ pub fn main() !void {
     const cmd = std.meta.stringToEnum(Commands, args[1]) orelse Commands.help;
     if (switch (cmd) {
         .decode, .info, .peers => args.len != 3,
-        .handshake => args.len != 4,
+        .handshake, .download => args.len != 4,
         .download_piece => args.len != 5,
         else => args.len != 2,
     }) {
@@ -165,82 +167,87 @@ pub fn main() !void {
             if (unchk != .unchoke) return MessageError.Invalid;
             std.log.info("Received 'unchoke'", .{});
 
-            // calculate the piece length according to the index,
-            // the last index might get a piece smaller than the other pieces
-            // this is only necesary one per piece
-            const num_full_pieces = try std.math.divFloor(
-                i64,
-                meta.info.length,
-                meta.info.piece_length,
-            );
-            const piece_length: i64 = if (p_piece_index < num_full_pieces)
-                meta.info.piece_length
-            else
-                meta.info.length - num_full_pieces * meta.info.piece_length;
-
-            var piece_byte_index: u32 = 0;
-            const block_length: u32 = 16 * 1024;
             var res = std.ArrayList(u8).init(allocator);
             defer res.deinit();
-            try res.ensureTotalCapacityPrecise(@intCast(piece_length));
-
-            // while we havent download the piece yet
-            while (piece_byte_index != piece_length) {
-                const left = piece_length - piece_byte_index;
-                const bytes = if (left >= block_length) block_length else left;
-
-                const request: Message = .{
-                    .request = .{
-                        .index = p_piece_index,
-                        .begin = piece_byte_index,
-                        .length = @intCast(bytes),
-                    },
-                };
-
-                // request block
-                try request.write(conn_writer);
-
-                // wait for the piece message
-                const read = try Message.init(allocator, conn_reader);
-                defer read.deinit(allocator);
-                if (read != .piece) return MessageError.Invalid;
-
-                // we should've got what we requested
-                std.debug.assert(read.piece.index == p_piece_index);
-                std.debug.assert(read.piece.begin == piece_byte_index);
-                std.debug.assert(read.piece.block.len == bytes);
-
-                try res.appendSlice(read.piece.block);
-                piece_byte_index += @intCast(bytes);
-
-                try stdout.print("Progress: {} of {} for this piece\r", .{
-                    std.fmt.fmtIntSizeDec(piece_byte_index),
-                    std.fmt.fmtIntSizeDec(@intCast(piece_length)),
-                });
-            }
-            try stdout.print("\n", .{});
-
-            // check piece integrity
-            var sha1 = Sha1.init(.{});
-            sha1.update(res.items);
-            const piece_hash = sha1.finalResult();
-            const start_index = p_piece_index * 20;
-            if (std.mem.eql(u8, &piece_hash, meta.info.pieces[start_index .. start_index + 20])) {
-                try stdout.print("Piece SHA1 hash verified correctly\n", .{});
+            // res contains the piece content
+            if (try Peer.downloadPiece(allocator, meta, connection, p_piece_index, &res)) {
+                // store piece in file
+                var file = try std.fs.cwd().createFile(p_ofile, .{ .read = true });
+                defer file.close();
+                const file_writer = file.writer();
+                try file_writer.writeAll(res.items);
+                try stdout.print("Piece contents written into file '{s}'", .{p_ofile});
             } else {
-                try stderr.print("Piece SHA1 hash failed\n", .{});
+                try stderr.print("Could not download piece {}", .{p_piece_index});
             }
+        },
+        .download => {
+            // ./program download <output_file> <torrent>
+            const p_ofile = args[2];
+            const p_torrent = args[3];
 
-            // store piece in file
+            var bencode = try Bencode.decodeBencodeFromFile(allocator, p_torrent);
+            defer bencode.deinit(allocator);
+            const meta = try MetaInfo.init(allocator, bencode.value);
+            const total_pieces: u32 = @intCast(meta.info.pieces.len / 20);
+
+            var trckr_response: Bencode.ValueManaged = try Tracker.getResponse(allocator, meta);
+            defer trckr_response.deinit(allocator);
+
+            const peers = try Tracker.getPeersFromResponse(allocator, trckr_response.value);
+            const peer = peers[0]; // we will just use the first peer for simplicity
+
+            // conect to peer
+            var connection = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer });
+            defer connection.close();
+            std.log.info("Connected to peer", .{});
+            const conn_writer = connection.writer();
+            const conn_reader = connection.reader();
+
+            // send and receive handshake
+            const handshake = HandShake.createFromMeta(meta);
+            try conn_writer.writeStruct(handshake);
+            _ = try conn_reader.readStruct(HandShake);
+            std.log.info("Done handshake with peer", .{});
+
+            const msg = try Message.init(allocator, conn_reader);
+            defer msg.deinit(allocator);
+            if (msg != .bitfield) return MessageError.Invalid;
+            std.log.info("Received 'bitfield'", .{});
+
+            const int: Message = .interested;
+            try int.write(conn_writer);
+            std.log.info("Sent 'interested'", .{});
+
+            const unchk = try Message.init(allocator, conn_reader);
+            defer unchk.deinit(allocator);
+            if (unchk != .unchoke) return MessageError.Invalid;
+            std.log.info("Received 'unchoke'", .{});
+
+            // res contains the piece content
+            var res = std.ArrayList(u8).init(allocator);
+            defer res.deinit();
             var file = try std.fs.cwd().createFile(p_ofile, .{ .read = true });
             defer file.close();
-            const file_writer = file.writer();
-            try file_writer.writeAll(res.items);
-            try stdout.print("Piece contents written into file '{s}'", .{p_ofile});
+            const total: u64 = @intCast(meta.info.length);
+            var downloaded: u64 = 0;
+
+            for (0..total_pieces) |i| {
+                const index: u32 = @intCast(i);
+
+                // store piece in file
+                if (try Peer.downloadPiece(allocator, meta, connection, index, &res)) {
+                    try file.writer().writeAll(res.items);
+                    try stdout.print("Downloaded {} of {}\r", .{
+                        std.fmt.fmtIntSizeDec(downloaded),
+                        std.fmt.fmtIntSizeDec(total),
+                    });
+                    downloaded += res.items.len;
+                } else try stderr.print("Could not download piece {}\n", .{index});
+            }
+            try stdout.print("File '{s}' downloaded succesfully\n", .{p_ofile});
         },
-        .help => {
-            try Commands.printHelp();
-        },
+        .help => try Commands.printHelp(),
     }
 }
 
