@@ -231,6 +231,29 @@ pub const MessageError = error{
     Invalid,
 };
 
+pub fn connectToPeer(peer_ip: std.net.Address, meta: MetaInfo) !std.net.Stream {
+    std.log.info("Trying to connect to peer...", .{});
+    var conn = try std.net.tcpConnectToAddress(peer_ip);
+    std.log.info("Connected to peer", .{});
+
+    std.log.info("Sending handshake to peer...", .{});
+    const hndshk = HandShake.createFromMeta(meta);
+    try conn.writer().writeStruct(hndshk);
+    std.log.info("Waiting for response...", .{});
+    const resp_handshake = try conn.reader().readStruct(HandShake);
+    std.log.info("Got a response from peer ", .{});
+    const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
+    try stdout.print("Peer ID: {s}\n", .{peer_id});
+
+    if (!std.mem.eql(u8, &resp_handshake.pstr, &hndshk.pstr) or
+        resp_handshake.pstrlen != 19 or
+        !std.mem.eql(u8, &resp_handshake.info_hash, &hndshk.info_hash))
+    {
+        return error.HandShakeError;
+    }
+    return conn;
+}
+
 /// Temporary function, might get reworked, i dont really like it
 pub fn downloadPiece(
     allocator: Allocator,
@@ -252,39 +275,32 @@ pub fn downloadPiece(
     else
         meta.info.length - num_whole_pieces * meta.info.piece_length;
 
-    var piece_byte_index: u32 = 0;
     const block_length: u32 = 16 * 1024;
     try res.ensureTotalCapacityPrecise(@intCast(piece_length));
     res.clearRetainingCapacity();
 
-    // while we havent download the piece yet
-    while (piece_byte_index != piece_length) {
-        const left = piece_length - piece_byte_index;
-        const bytes = if (left >= block_length) block_length else left;
-
+    var i: i64 = 0;
+    while (i < piece_length) {
+        const bytes = @min(block_length, piece_length - i);
         const request: Message = .{
             .request = .{
                 .index = piece_index,
-                .begin = piece_byte_index,
+                .begin = @intCast(i),
                 .length = @intCast(bytes),
             },
         };
-
-        // request block
         try request.write(conn.writer());
+        i += bytes;
+    }
 
-        // wait for the piece message
+    // wait for the piece message
+    var piece_byte_index: u32 = 0; // actual downloaded
+    while (piece_byte_index < piece_length) {
         const read = try Message.init(allocator, conn.reader());
         defer read.deinit(allocator);
         if (read != .piece) return MessageError.Invalid;
-
-        // we should've got what we requested
-        std.debug.assert(read.piece.index == piece_index);
-        std.debug.assert(read.piece.begin == piece_byte_index);
-        std.debug.assert(read.piece.block.len == bytes);
-
         try res.appendSlice(read.piece.block);
-        piece_byte_index += @intCast(bytes);
+        piece_byte_index += @intCast(read.piece.block.len);
     }
 
     // check piece integrity

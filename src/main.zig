@@ -95,26 +95,13 @@ pub fn main() !void {
             var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
             defer bencode.deinit(allocator);
             const meta = try MetaInfo.init(allocator, bencode.value);
-            const handshake = HandShake.createFromMeta(meta);
             std.log.info("Created handshake struct", .{});
 
             // Connect to peer
             const addr: std.net.Address = try parseAddressArg(args[3]);
             std.log.info("Trying to connect to peer...", .{});
-            var connection = try std.net.tcpConnectToAddress(addr);
-            defer connection.close();
-            std.log.info("Connected to peer", .{});
-            const writer = connection.writer();
-            const reader = connection.reader();
-
-            // send and receive handshake
-            std.log.info("Sending handshake to peer...", .{});
-            try writer.writeStruct(handshake);
-            std.log.info("Waiting for response...", .{});
-            const resp_handshake = try reader.readStruct(HandShake);
-            std.log.info("Got a response from peer ", .{});
-            const peer_id = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
-            try stdout.print("Peer ID: {s}\n", .{peer_id});
+            const conn: std.net.Stream = try Peer.connectToPeer(addr, meta);
+            defer conn.close();
         },
         .download_piece => {
             const p_torrent = args[3];
@@ -125,7 +112,7 @@ pub fn main() !void {
             defer bencode.deinit(allocator);
             const meta = try MetaInfo.init(allocator, bencode.value);
 
-            const total_pieces = meta.info.pieces.len / 20;
+            const total_pieces = try std.math.divCeil(i64, meta.info.length, meta.info.piece_length);
             if (p_piece_index >= total_pieces) {
                 std.log.err(
                     "Invalid piece index {}. Max is {}",
@@ -141,28 +128,20 @@ pub fn main() !void {
             const peer = peers[0]; // we will just use the first peer for simplicity
 
             // conect to peer
-            var connection = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer });
-            defer connection.close();
-            std.log.info("Connected to peer", .{});
-            const conn_writer = connection.writer();
-            const conn_reader = connection.reader();
-
-            // send and receive handshake
-            const handshake = HandShake.createFromMeta(meta);
-            try conn_writer.writeStruct(handshake);
-            _ = try conn_reader.readStruct(HandShake);
+            var conn = try Peer.connectToPeer(.{ .in = peer }, meta);
+            defer conn.close();
             std.log.info("Done handshake with peer", .{});
 
-            const msg = try Message.init(allocator, conn_reader);
+            const msg = try Message.init(allocator, conn.reader());
             defer msg.deinit(allocator);
             if (msg != .bitfield) return MessageError.Invalid;
             std.log.info("Received 'bitfield'", .{});
 
             const int: Message = .interested;
-            try int.write(conn_writer);
+            try int.write(conn.writer());
             std.log.info("Sent 'interested'", .{});
 
-            const unchk = try Message.init(allocator, conn_reader);
+            const unchk = try Message.init(allocator, conn.reader());
             defer unchk.deinit(allocator);
             if (unchk != .unchoke) return MessageError.Invalid;
             std.log.info("Received 'unchoke'", .{});
@@ -170,12 +149,11 @@ pub fn main() !void {
             var res = std.ArrayList(u8).init(allocator);
             defer res.deinit();
             // res contains the piece content
-            if (try Peer.downloadPiece(allocator, meta, connection, p_piece_index, &res)) {
+            if (try Peer.downloadPiece(allocator, meta, conn, p_piece_index, &res)) {
                 // store piece in file
                 var file = try std.fs.cwd().createFile(p_ofile, .{ .read = true });
                 defer file.close();
-                const file_writer = file.writer();
-                try file_writer.writeAll(res.items);
+                try file.writer().writeAll(res.items);
                 try stdout.print("Piece contents written into file '{s}'", .{p_ofile});
             } else {
                 try stderr.print("Could not download piece {}", .{p_piece_index});
