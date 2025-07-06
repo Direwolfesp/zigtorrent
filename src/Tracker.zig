@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ip4Address = std.net.Ip4Address;
 const stdout = std.io.getStdOut().writer();
+const stderr = std.io.getStdErr().writer();
 
 const Bencode = @import("Bencode.zig");
 const MetaInfo = @import("MetaInfo.zig").MetaInfo;
@@ -106,11 +107,16 @@ pub fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueM
 
     // read the bencoded response body
     const body: []u8 = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
-    const bodyDecoded: Bencode.Value = try Bencode.decodeBencode(allocator, body);
+    const response: Bencode.Value = try Bencode.decodeBencode(allocator, body);
+
+    if (response.dict.get("failure reason")) |failure| {
+        try stderr.print("Failed to connect to tracker, Error: {s}\n", .{failure.string});
+        return error.TrackerError;
+    }
 
     return .{
         .backing_buffer = body,
-        .value = bodyDecoded,
+        .value = response,
     };
 }
 

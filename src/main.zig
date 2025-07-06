@@ -78,16 +78,16 @@ pub fn main() !void {
             try parsedMeta.printMetaInfo();
         },
         .peers => {
-            var bencode = try Bencode.decodeBencodeFromFile(allocator, args[2]);
-            defer bencode.deinit(allocator);
-            const meta = try MetaInfo.init(allocator, bencode.value);
+            var torrent = try Bencode.decodeBencodeFromFile(allocator, args[2]);
+            defer torrent.deinit(allocator);
+            const meta = try MetaInfo.init(allocator, torrent.value);
 
-            var bodyDecoded = try Tracker.getResponse(allocator, meta);
-            defer bodyDecoded.deinit(allocator);
+            var response = try Tracker.getResponse(allocator, meta);
+            defer response.deinit(allocator);
 
             const peers: []std.net.Ip4Address = try Tracker.getPeersFromResponse(
                 allocator,
-                bodyDecoded.value,
+                response.value,
             );
             for (peers) |peer| try stdout.print("{}\n", .{peer});
         },
@@ -125,7 +125,8 @@ pub fn main() !void {
             defer trckr_response.deinit(allocator);
 
             const peers = try Tracker.getPeersFromResponse(allocator, trckr_response.value);
-            const peer = peers[0]; // we will just use the first peer for simplicity
+            const rand = std.crypto.random;
+            const peer = peers[rand.intRangeAtMost(u32, 0, @intCast(peers.len - 1))]; // we will just use a random peer for simplicity
 
             // conect to peer
             var conn = try Peer.connectToPeer(.{ .in = peer }, meta);
@@ -160,7 +161,6 @@ pub fn main() !void {
             }
         },
         .download => {
-            // ./program download <output_file> <torrent>
             const p_ofile = args[2];
             const p_torrent = args[3];
 
@@ -176,28 +176,26 @@ pub fn main() !void {
             const peer = peers[0]; // we will just use the first peer for simplicity
 
             // conect to peer
-            var connection = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer });
-            defer connection.close();
+            var conn = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer });
+            defer conn.close();
             std.log.info("Connected to peer", .{});
-            const conn_writer = connection.writer();
-            const conn_reader = connection.reader();
 
             // send and receive handshake
             const handshake = HandShake.createFromMeta(meta);
-            try conn_writer.writeStruct(handshake);
-            _ = try conn_reader.readStruct(HandShake);
+            try conn.writer().writeStruct(handshake);
+            _ = try conn.reader().readStruct(HandShake);
             std.log.info("Done handshake with peer", .{});
 
-            const msg = try Message.init(allocator, conn_reader);
+            const msg = try Message.init(allocator, conn.reader());
             defer msg.deinit(allocator);
             if (msg != .bitfield) return MessageError.Invalid;
             std.log.info("Received 'bitfield'", .{});
 
             const int: Message = .interested;
-            try int.write(conn_writer);
+            try int.write(conn.writer());
             std.log.info("Sent 'interested'", .{});
 
-            const unchk = try Message.init(allocator, conn_reader);
+            const unchk = try Message.init(allocator, conn.reader());
             defer unchk.deinit(allocator);
             if (unchk != .unchoke) return MessageError.Invalid;
             std.log.info("Received 'unchoke'", .{});
@@ -214,7 +212,7 @@ pub fn main() !void {
                 const index: u32 = @intCast(i);
 
                 // store piece in file
-                if (try Peer.downloadPiece(allocator, meta, connection, index, &res)) {
+                if (try Peer.downloadPiece(allocator, meta, conn, index, &res)) {
                     try file.writer().writeAll(res.items);
                     try stdout.print("Downloaded {} of {}\r", .{
                         std.fmt.fmtIntSizeDec(downloaded),

@@ -5,6 +5,7 @@ My solution to BitTorrent CodeCrafters challenge in Zig.
 ## Features
 - Download a piece
 - Download a file
+- Succesfully downloaded a [debian iso](https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/)
 
 ## Todo
 - Move Piece downloading logic
