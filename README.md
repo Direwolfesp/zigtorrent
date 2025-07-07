@@ -1,6 +1,6 @@
 # zigtorrent
 
-'Toy' Bittorrenct (original spec) CLI client that lives as a learning proyect 
+'Toy' Bittorrenct (original spec) CLI client that serves as a learning proyect for myself so its not expected to work optimally.  
 
 ## Features
 - Download a piece
@@ -9,7 +9,7 @@
 - Multithreaded (works but is a bit experimental)
 
 ## Todo
-- More testing (ie. torrents such as ubuntu iso doesnt work)
+- More testing (ie. torrents such as ubuntu iso don't work)
 - Multifile torrents
 - Magnet links
 - Support seeding
