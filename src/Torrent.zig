@@ -43,12 +43,15 @@ const PieceStatus = struct {
     pipeline_length: u32,
 };
 
+/// Data type that hold a fifo queue protected by a mutex and condition.
+/// With blocking I/O.
 fn AtomicQueue(comptime T: type) type {
     return struct {
         queue: std.fifo.LinearFifo(T, .Dynamic),
         mutex: Thread.Mutex,
         cond: Thread.Condition,
 
+        /// Caller owns the returned memory, call deinit()
         pub fn init(allocator: Allocator) @This() {
             return .{
                 .mutex = .{},
@@ -61,6 +64,18 @@ fn AtomicQueue(comptime T: type) type {
             self.queue.deinit();
         }
 
+        pub fn isEmpty(self: *@This()) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.queue.count == 0;
+        }
+
+        pub fn getCount(self: *@This()) usize {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.queue.count;
+        }
+
         /// Enqueues T
         pub fn enqueueElem(self: *@This(), elem: T) !void {
             self.mutex.lock();
@@ -71,7 +86,7 @@ fn AtomicQueue(comptime T: type) type {
         }
 
         /// reads and dequeus T. Blocking
-        pub fn blockingRead(self: *@This()) T {
+        pub fn dequeueElem(self: *@This()) T {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -199,6 +214,7 @@ pub const MetaInfo = struct {
             });
         }
 
+        // atomic queue that will hold the results procuded by the workers
         var res = Results.init(allocator);
         defer res.deinit();
 
@@ -225,15 +241,25 @@ pub const MetaInfo = struct {
         var buff: []u8 = try allocator.alloc(u8, @intCast(self.info.length));
         defer allocator.free(buff);
 
+        // main thread will keep reading the result queue and
+        // copy each PieceResult into the buffer
         var pieces_downloaded: u64 = 0;
         while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
-            const piece_res: PieceCompleted = res.blockingRead();
+            const piece_res: PieceCompleted = res.dequeueElem();
+
             const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
             const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
+
             @memcpy(buff[start..end], piece_res.buf);
             allocator.free(piece_res.buf);
+
             const percent: f64 = @as(f64, @floatFromInt(pieces_downloaded)) / @as(f64, @floatFromInt(self.info.pieces.len)) * 100.0;
-            try stdout.print("[{d:.2}] Downloaded piece #{d}\n", .{ percent, piece_res.index });
+            try stdout.print("[{d:.2}%] Downloaded piece #{d}. {} of {}\n", .{
+                percent,
+                piece_res.index,
+                pieces_downloaded,
+                self.info.pieces.len,
+            });
         }
 
         // wait for threads
@@ -270,34 +296,30 @@ pub const MetaInfo = struct {
         try client.sendUnchoke();
         try client.sendInterested();
 
-        while (tasks.queue.count > 0) {
-            const task: PieceTask = tasks.blockingRead();
+        while (!tasks.isEmpty()) {
+            const task: PieceTask = tasks.dequeueElem();
 
-            // If client doesnt have the piece, requeue it
-            const has = client.hasPiece(task.index) catch false;
-            if (!has) {
+            // if client doesnt have the piece, requeue it
+            if (!try client.hasPiece(task.index)) {
                 try tasks.enqueueElem(task);
                 continue;
             }
 
-            // Start downloading the piece
+            // allocate mem for the piece
             const piece_buffer = try allocator.alloc(u8, task.length);
-
-            // Use your own pieceProgress struct if needed
-            const ok = try downloadPiece(
+            const piece_downloaded: bool = try downloadPiece(
                 allocator,
                 &client,
                 task,
                 piece_buffer,
             );
 
-            if (!ok) {
+            if (!piece_downloaded) {
                 try tasks.enqueueElem(task); // try again later
                 continue;
             }
 
-            const valid = checkIntegrity(task, piece_buffer);
-            if (!valid) {
+            if (!checkIntegrity(task, piece_buffer)) {
                 stderr.print("Piece {} failed integrity\n", .{task.index}) catch {};
                 try tasks.enqueueElem(task);
                 continue;
@@ -311,6 +333,8 @@ pub const MetaInfo = struct {
         }
     }
 
+    /// Checks if the downloaded piece in ´buf´ has the same
+    /// hash as the ´task´.
     fn checkIntegrity(task: PieceTask, buf: []const u8) bool {
         var hash = Sha1.init(.{});
         hash.update(buf);
@@ -322,8 +346,9 @@ pub const MetaInfo = struct {
         allocator: Allocator,
         client: *Client,
         task: PieceTask,
-        buf: []u8,
+        buf: []u8, // will be filled with the downloaded piece
     ) !bool {
+        const MAX_BACKLOG: usize = 5; // requests pipeline length
         var downloaded: usize = 0;
         var requested: usize = 0;
         var backlog: usize = 0;
@@ -331,7 +356,8 @@ pub const MetaInfo = struct {
         const deadline = std.time.nanoTimestamp() + std.time.ns_per_s * 30;
         while (downloaded < task.length) {
             if (!client.choked) {
-                while (backlog < 5 and requested < task.length) {
+                // request more blocks as long as pipeline is not full and we havent download all blocks
+                while (backlog < MAX_BACKLOG and requested < task.length) {
                     const block_size = @min(16 * 1024, task.length - requested);
                     try client.sendRequest(task.index, @intCast(requested), block_size);
                     requested += block_size;
@@ -339,15 +365,23 @@ pub const MetaInfo = struct {
                 }
             }
 
+            // if the piece is not downloaded in 30sec, abort
             const now = std.time.nanoTimestamp();
-            if (now > deadline) return false;
+            if (now > deadline)
+                return false;
 
-            const msg = try Message.init(allocator, client.conn.reader());
+            const msg = try Message.read(allocator, client.conn.reader());
             defer msg.deinit(allocator);
             switch (msg) {
                 .piece => |p| {
-                    const copied = @min(p.block.len, buf.len - downloaded);
-                    @memcpy(buf[downloaded..][0..copied], p.block[0..copied]);
+                    std.debug.assert(p.index == task.index); //DEBUG
+                    std.debug.assert(p.block.len + p.begin <= buf.len); // received more bytes than available in onepice
+
+                    // important to note that blocks may not be received in order
+                    const copied = p.block.len;
+                    const offset = p.begin;
+                    @memcpy(buf[offset..][0..copied], p.block[0..copied]);
+
                     downloaded += copied;
                     backlog -= 1;
                 },
@@ -388,10 +422,10 @@ pub const MetaInfo = struct {
         , .{
             self.announce,
             self.info.name,
-            std.fmt.fmtIntSizeDec(self.info.length),
+            std.fmt.fmtIntSizeDec(@intCast(self.info.length)),
             std.fmt.fmtSliceHexLower(&self.info_hash),
             self.info.pieces.len,
-            std.fmt.fmtIntSizeDec(self.info.piece_length),
+            std.fmt.fmtIntSizeDec(@intCast(self.info.piece_length)),
         });
         try self.printPieceHashes();
     }

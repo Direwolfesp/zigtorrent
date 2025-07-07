@@ -57,7 +57,7 @@ pub const Message = union(enum) {
     /// Creates a message from a given `reader`.
     /// Caller owns the returned memory, must call deinit()
     /// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
-    pub fn init(allocator: Allocator, reader: anytype) !Self {
+    pub fn read(allocator: Allocator, reader: anytype) !Self {
         const len: u32 = try reader.readInt(u32, .big);
         const msg_id: ?MessageID = if (len > 0) try reader.readEnum(MessageID, .big) else null;
         const payload: ?[]u8 = if (len > 1) try allocator.alloc(u8, len - 1) else null;

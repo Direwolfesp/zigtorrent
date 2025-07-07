@@ -27,7 +27,7 @@ pub const Client = struct {
         const conn = try Peer.connectToPeer(peer_ip, peer_id, meta);
 
         // received bitfield
-        const bf: Message = try Message.init(allocator, conn.reader());
+        const bf: Message = try Message.read(allocator, conn.reader());
         if (bf != .bitfield) return error.ClientConnFailed;
 
         return .{

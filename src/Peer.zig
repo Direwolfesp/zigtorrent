@@ -45,8 +45,6 @@ pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: MetaInf
     std.log.info("Waiting for response...", .{});
     const resp_handshake = try conn.reader().readStruct(HandShake);
     std.log.info("Got a response from peer ", .{});
-    const peer_id_fmt = std.fmt.fmtSliceHexLower(&resp_handshake.peer_id);
-    try stdout.print("Peer ID: {s}\n", .{peer_id_fmt});
 
     if (!std.mem.eql(u8, &resp_handshake.pstr, &hndshk.pstr) or
         resp_handshake.pstrlen != 19 or
