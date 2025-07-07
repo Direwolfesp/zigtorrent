@@ -325,7 +325,7 @@ pub const MetaInfo = struct {
                 continue;
             }
 
-            // Successful: enqueue the result
+            // Success: enqueue the result
             try results.enqueueElem(PieceCompleted{
                 .index = task.index,
                 .buf = piece_buffer,
@@ -348,7 +348,7 @@ pub const MetaInfo = struct {
         task: PieceTask,
         buf: []u8, // will be filled with the downloaded piece
     ) !bool {
-        const MAX_BACKLOG: usize = 5; // requests pipeline length
+        const MAX_BACKLOG: usize = 10; // requests pipeline length
         var downloaded: usize = 0;
         var requested: usize = 0;
         var backlog: usize = 0;
@@ -374,10 +374,9 @@ pub const MetaInfo = struct {
             defer msg.deinit(allocator);
             switch (msg) {
                 .piece => |p| {
-                    std.debug.assert(p.index == task.index); //DEBUG
                     std.debug.assert(p.block.len + p.begin <= buf.len); // received more bytes than available in onepice
 
-                    // important to note that blocks may not be received in order
+                    // NOTE: blocks may not be received in order
                     const copied = p.block.len;
                     const offset = p.begin;
                     @memcpy(buf[offset..][0..copied], p.block[0..copied]);

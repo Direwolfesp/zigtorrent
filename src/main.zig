@@ -16,7 +16,6 @@ pub fn main() !void {
     const o_file = args[2];
 
     var meta_managed = try Torrent.open(allocator, i_file);
-    // try meta_managed.meta.printMetaInfo(); // TESTING PRINT
     defer meta_managed.deinit(allocator);
 
     try meta_managed.meta.download(allocator, o_file);
