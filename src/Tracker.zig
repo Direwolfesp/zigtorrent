@@ -5,7 +5,7 @@ const stdout = std.io.getStdOut().writer();
 const stderr = std.io.getStdErr().writer();
 
 const Bencode = @import("Bencode.zig");
-const MetaInfo = @import("MetaInfo.zig").MetaInfo;
+const MetaInfo = @import("Torrent.zig").MetaInfo;
 
 pub const RequestParams = struct {
     announce: []const u8 = undefined,
@@ -62,7 +62,7 @@ pub const RequestParams = struct {
 };
 
 /// constructs a request based on metainfo
-pub fn createRequest(meta: MetaInfo) RequestParams {
+fn createRequest(meta: MetaInfo) RequestParams {
     return RequestParams{
         .info_hash = meta.info_hash,
         .left = meta.info.length,
@@ -74,7 +74,7 @@ pub fn createRequest(meta: MetaInfo) RequestParams {
 /// and returns the `Bencode.ValueManaged` response.
 /// -> `meta` is the MetaInfo struct from the file
 /// -> `allocator` caller owns the returned memory.
-pub fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueManaged {
+fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueManaged {
     // MetaInfo -> RequestParams -> Response
 
     // request Params and create URI
@@ -122,7 +122,11 @@ pub fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueM
 
 /// Parses the peer ips from the response of the tracker.
 /// Caller owns the returned memory.
-pub fn getPeersFromResponse(allocator: std.mem.Allocator, response: Bencode.Value) ![]Ip4Address {
+pub fn getPeersFromResponse(allocator: std.mem.Allocator, meta: MetaInfo) ![]Ip4Address {
+    var resp_managed = try getResponse(allocator, meta);
+    defer resp_managed.deinit(allocator);
+
+    const response = resp_managed.value;
     const data_opt: ?[]const u8 = blk: {
         const peer: Bencode.Value = response.dict.get("peers") orelse return error.PeersNotFound;
         switch (peer) {

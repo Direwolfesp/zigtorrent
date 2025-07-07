@@ -151,7 +151,20 @@ pub const Value = union(enum) {
     }
 }; // end BencodeValue
 
+/// Owns the content from the file,
+/// thus requires freeing memory with deinit()
+pub const ValueManaged = struct {
+    value: Value,
+    backing_buffer: []u8,
+
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
+        self.value.deinit();
+        allocator.free(self.backing_buffer);
+    }
+};
+
 /// Given a Bencoded string -> BencodeValue
+/// Caller owns the returned memory
 pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !Value {
     switch (encodedValue[0]) {
         '0'...'9' => {
@@ -215,30 +228,6 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !Value {
     }
 }
 
-/// Owns the content from the file,
-/// thus requires freeing memory with deinit()
-pub const ValueManaged = struct {
-    value: Value,
-    backing_buffer: []u8,
-
-    pub fn deinit(self: *@This(), allocator: Allocator) void {
-        self.value.deinit();
-        allocator.free(self.backing_buffer);
-    }
-};
-
-/// Parses a file and returns its decoded content.
-/// Caller owns the returned memory
-pub fn decodeBencodeFromFile(allocator: Allocator, path: []const u8) !ValueManaged {
-    var file: std.fs.File = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const content: []u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    return .{
-        .value = try decodeBencode(allocator, content),
-        .backing_buffer = content,
-    };
-}
-
 test "len" {
     const alloc = std.testing.allocator;
     {
@@ -246,25 +235,21 @@ test "len" {
         const ben = try decodeBencode(alloc, val);
         try testing.expect(try ben.len() == 5);
     }
-
     {
         const val = "i0e";
         const ben = try decodeBencode(alloc, val);
         try testing.expect(try ben.len() == 3);
     }
-
     {
         const val = "i773e";
         const ben = try decodeBencode(alloc, val);
         try testing.expect(try ben.len() == 5);
     }
-
     {
         const val = "10:HelloWorld";
         const ben = try decodeBencode(alloc, val);
         try testing.expect(try ben.len() == 13);
     }
-
     {
         const val = "l10:HelloWorldi773ee";
         var ben = try decodeBencode(alloc, val);
