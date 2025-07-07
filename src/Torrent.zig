@@ -228,12 +228,10 @@ pub const MetaInfo = struct {
         var pieces_downloaded: u64 = 0;
         while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
             const piece_res: PieceCompleted = res.blockingRead();
-            try stdout.print("GOT A DOWNLOAD: PIECE_INDEX={} \n\n\n\n\n", .{piece_res.index});
             const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
             const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
-            std.debug.assert(end - start == piece_res.buf.len); // SAME SIZE
-            std.debug.assert(start + piece_res.buf.len <= self.info.length); // NO MORE THAN THE FILE
-            @memcpy(buff[start..end], piece_res.buf); // FIX: SEGFAULT
+            @memcpy(buff[start..end], piece_res.buf);
+            allocator.free(piece_res.buf);
             const percent: f64 = @as(f64, @floatFromInt(pieces_downloaded)) / @as(f64, @floatFromInt(self.info.pieces.len)) * 100.0;
             try stdout.print("[{d:.2}] Downloaded piece #{d}\n", .{ percent, piece_res.index });
         }
@@ -243,8 +241,8 @@ pub const MetaInfo = struct {
             worker.join();
 
         // copy buffer into file
-        var file = std.fs.cwd().openFile(ofile, .{}) catch {
-            try stdout.print("Could not open file '{s}'\n", .{ofile});
+        var file = std.fs.cwd().createFile(ofile, .{}) catch {
+            try stdout.print("Could not create file '{s}'\n", .{ofile});
             return;
         };
         defer file.close();
@@ -284,7 +282,6 @@ pub const MetaInfo = struct {
 
             // Start downloading the piece
             const piece_buffer = try allocator.alloc(u8, task.length);
-            defer allocator.free(piece_buffer);
 
             // Use your own pieceProgress struct if needed
             const ok = try downloadPiece(
@@ -306,12 +303,11 @@ pub const MetaInfo = struct {
                 continue;
             }
 
-            // Successful
-            const result = PieceCompleted{
+            // Successful: enqueue the result
+            try results.enqueueElem(PieceCompleted{
                 .index = task.index,
                 .buf = piece_buffer,
-            };
-            try results.enqueueElem(result);
+            });
         }
     }
 
