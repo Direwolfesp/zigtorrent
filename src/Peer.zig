@@ -87,15 +87,13 @@ pub fn parsePeersBinary(allocator: Allocator, data: []const u8) ![]std.net.Ip4Ad
     while (i + 5 < data.len) : (i += 6) {
         const ip: []const u8 = data[i .. i + 4];
         const port: u16 = std.mem.readInt(u16, data[i + 4 .. i + 6][0..2], .big);
-        const ip_fmt = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{
-            ip[0],
-            ip[1],
-            ip[2],
-            ip[3],
-        });
-        defer allocator.free(ip_fmt);
-        const addr = try std.net.Address.resolveIp(ip_fmt, port);
-        try peers.append(addr.in);
+
+        var ipa: [4]u8 = undefined;
+        inline for (0..4) |j|
+            ipa[j] = ip[j];
+
+        const address = std.net.Address.initIp4(ipa, port);
+        try peers.append(address.in);
     }
     return peers.toOwnedSlice();
 }
