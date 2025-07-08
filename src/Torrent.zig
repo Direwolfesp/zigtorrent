@@ -328,6 +328,8 @@ pub const MetaInfo = struct {
                 continue;
             }
 
+            try client.sendHave(task.index);
+
             // Success: enqueue the result
             try results.enqueueElem(PieceCompleted{
                 .index = task.index,
