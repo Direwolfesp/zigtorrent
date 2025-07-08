@@ -197,7 +197,8 @@ pub const MetaInfo = struct {
     }
 
     /// Downloads a torrent file into ofile
-    pub fn download(self: *MetaInfo, allocator: Allocator, ofile: []const u8) !void {
+    /// returns true in success, false otherwise
+    pub fn download(self: *MetaInfo, allocator: Allocator, ofile: []const u8) !bool {
         const peers = try Tracker.getPeersFromResponse(allocator, self.*);
         defer allocator.free(peers);
 
@@ -220,10 +221,12 @@ pub const MetaInfo = struct {
 
         // Spawn workers
         const num_workers: u64 = @min(self.info.pieces.len, try Thread.getCpuCount() * 2, peers.len);
-        var workers: []Thread = try allocator.alloc(Thread, num_workers);
-        defer allocator.free(workers);
-        for (workers, 0..) |_, i| {
-            const peer = peers[i];
+        var pool: Thread.Pool = undefined;
+        try pool.init(.{ .allocator = allocator, .n_jobs = num_workers });
+        defer pool.deinit();
+        var wg: Thread.WaitGroup = .{};
+        for (0..num_workers) |_| {
+            const peer = peers[std.crypto.random.intRangeAtMost(usize, 0, peers.len - 1)];
             const ctx: *Context = try allocator.create(Context);
 
             ctx.* = .{
@@ -234,7 +237,7 @@ pub const MetaInfo = struct {
                 .results = &res,
             };
 
-            workers[i] = try Thread.spawn(.{}, downloadWorkerThreadFn, .{ctx});
+            pool.spawnWg(&wg, downloadWorkerThreadFn, .{ctx});
         }
 
         // copy the results into a buffer
@@ -263,16 +266,16 @@ pub const MetaInfo = struct {
         }
 
         // wait for threads
-        for (workers) |*worker|
-            worker.join();
+        wg.wait();
 
         // copy buffer into file
-        var file = std.fs.cwd().createFile(ofile, .{}) catch {
-            try stdout.print("Could not create file '{s}'\n", .{ofile});
-            return;
+        var file = std.fs.cwd().createFile(ofile, .{}) catch |err| {
+            stdout.print("Could not create file '{s}', Err: '{?}'\n", .{ ofile, err }) catch {};
+            return false;
         };
         defer file.close();
         try file.writer().writeAll(buff);
+        return true;
     }
 
     pub fn downloadWorker(
@@ -443,8 +446,10 @@ pub const MetaInfo = struct {
 };
 
 /// wrapper so it can be used by a thread (direct function pointer, not attached to an instance)
-fn downloadWorkerThreadFn(ctx: *Context) !void {
-    try ctx.meta.downloadWorker(ctx.allocator, ctx.peer, ctx.tasks, ctx.results);
+fn downloadWorkerThreadFn(ctx: *Context) void {
+    ctx.meta.downloadWorker(ctx.allocator, ctx.peer, ctx.tasks, ctx.results) catch |err| {
+        stderr.print("Error with thread worker, msg: {?}\n", .{err}) catch {};
+    };
 }
 
 /// Parses the given torrent file and retreives its contents.
