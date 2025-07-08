@@ -6,6 +6,7 @@ const stderr = std.io.getStdErr().writer();
 
 const Bencode = @import("Bencode.zig");
 const MetaInfo = @import("Torrent.zig").MetaInfo;
+const Peer = @import("Peer.zig");
 
 pub const RequestParams = struct {
     announce: []const u8 = undefined,
@@ -127,36 +128,17 @@ pub fn getPeersFromResponse(allocator: std.mem.Allocator, meta: MetaInfo) ![]Ip4
     defer resp_managed.deinit(allocator);
 
     const response = resp_managed.value;
-    const data_opt: ?[]const u8 = blk: {
+    const data_opt: ?[]Ip4Address = blk: {
         const peer: Bencode.Value = response.dict.get("peers") orelse return error.PeersNotFound;
         switch (peer) {
-            .string => |str| break :blk str,
+            .string => |str| break :blk try Peer.parsePeersBinary(allocator, str),
+            .list => |list| break :blk try Peer.parsePeersDict(allocator, list),
             else => break :blk null,
         }
     };
 
-    // Data could be null or could be incomplete.
-    // Each address is 6 bytes.
-    if (data_opt) |data| {
-        if (data.len % 6 != 0) return error.InvalidPeers;
-        var peers = std.ArrayList(Ip4Address).init(allocator);
-        defer peers.deinit();
-
-        var i: usize = 0;
-        while (i + 5 < data.len) : (i += 6) {
-            const ip: []const u8 = data[i .. i + 4];
-            const port: u16 = std.mem.readInt(u16, data[i + 4 .. i + 6][0..2], .big);
-            const ip_fmt = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{
-                ip[0],
-                ip[1],
-                ip[2],
-                ip[3],
-            });
-            defer allocator.free(ip_fmt);
-            const addr = try std.net.Address.resolveIp(ip_fmt, port);
-            try peers.append(addr.in);
-        }
-        return peers.toOwnedSlice();
-    }
-    return error.InvalidPeers;
+    if (data_opt) |peers|
+        return peers
+    else
+        return error.InvalidPeers;
 }
