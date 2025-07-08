@@ -5,7 +5,7 @@ const Messages = @import("Messages.zig");
 const Message = Messages.Message;
 
 const stdout = std.io.getStdOut().writer();
-const stderr = std.io.getStderr().writer();
+const stderr = std.io.getStdErr().writer();
 const Allocator = std.mem.Allocator;
 
 pub const Client = struct {
@@ -24,7 +24,10 @@ pub const Client = struct {
         peer_id: [20]u8,
         meta: MetaInfo,
     ) !@This() {
-        const conn = try Peer.connectToPeer(peer_ip, peer_id, meta);
+        const conn = Peer.connectToPeer(peer_ip, peer_id, meta) catch {
+            stderr.print("Handshake failed with peer {}", .{peer_ip}) catch {};
+            return error.HandShakeFailed;
+        };
 
         // received bitfield
         const bf: Message = try Message.read(allocator, conn.reader());

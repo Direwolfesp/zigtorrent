@@ -128,17 +128,11 @@ pub fn getPeersFromResponse(allocator: std.mem.Allocator, meta: MetaInfo) ![]Ip4
     defer resp_managed.deinit(allocator);
 
     const response = resp_managed.value;
-    const data_opt: ?[]Ip4Address = blk: {
-        const peer: Bencode.Value = response.dict.get("peers") orelse return error.PeersNotFound;
-        switch (peer) {
-            .string => |str| break :blk try Peer.parsePeersBinary(allocator, str),
-            .list => |list| break :blk try Peer.parsePeersDict(allocator, list),
-            else => break :blk null,
-        }
-    };
+    const peer: Bencode.Value = response.dict.get("peers") orelse return error.PeersNotFound;
 
-    if (data_opt) |peers|
-        return peers
-    else
-        return error.InvalidPeers;
+    return switch (peer) {
+        .string => |str| try Peer.parsePeersBinary(allocator, str),
+        .list => |list| try Peer.parsePeersDict(allocator, list),
+        else => error.InvalidPeers,
+    };
 }

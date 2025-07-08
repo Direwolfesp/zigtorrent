@@ -207,9 +207,9 @@ pub const MetaInfo = struct {
 
         // Fill in piece tasks
         try tasks.queue.ensureTotalCapacity(self.info.pieces.len);
-        for (self.info.pieces, 0..) |piece, i| {
+        for (self.info.pieces, 0..) |piece_hash, i| {
             try tasks.enqueueElem(PieceTask{
-                .hash = piece,
+                .hash = piece_hash,
                 .index = @intCast(i),
                 .length = @intCast(try self.calculatePieceSize(i)),
             });
@@ -285,15 +285,12 @@ pub const MetaInfo = struct {
         tasks: *Tasks,
         results: *Results,
     ) !void {
-        var client = Client.new(
+        var client = try Client.new(
             allocator,
             peer,
             "-qB6666-weoiuv8324ns".*,
             self,
-        ) catch {
-            try stderr.print("Could not handshake with {}\n", .{peer});
-            return;
-        };
+        );
         defer client.deinit(allocator);
 
         try client.sendUnchoke();

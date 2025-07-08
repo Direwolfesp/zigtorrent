@@ -36,16 +36,10 @@ pub const HandShake = extern struct {
 
 /// Connects to the given peer and returns the net.Stream
 pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: MetaInfo) !std.net.Stream {
-    std.log.info("Trying to connect to peer...", .{});
     var conn = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer_ip });
-    std.log.info("Connected to peer", .{});
-
-    std.log.info("Sending handshake to peer...", .{});
     const hndshk = HandShake.create(peer_id, meta);
     try conn.writer().writeStruct(hndshk);
-    std.log.info("Waiting for response...", .{});
     const resp_handshake = try conn.reader().readStruct(HandShake);
-    std.log.info("Got a response from peer ", .{});
 
     if (!std.mem.eql(u8, &resp_handshake.pstr, &hndshk.pstr) or
         resp_handshake.pstrlen != 19 or
