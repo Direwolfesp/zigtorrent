@@ -12,6 +12,7 @@
 - Better piece selection
 - Better peer selection and keeping track of them
 - More testing (ie. torrents such as ubuntu iso don't work)
+- Dont upload the entire file in memory. Just preallocate a file and seek and write to it.
 - Multifile torrents
 - Magnet links
 - Support seeding
