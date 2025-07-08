@@ -14,9 +14,9 @@ const Message = @import("Messages.zig").Message;
 const Context = struct {
     meta: *MetaInfo,
     allocator: Allocator,
-    peer: std.net.Ip4Address,
     tasks: *Tasks,
     results: *Results,
+    peers: *PeersQueue,
 };
 
 const PieceTask = struct {
@@ -95,11 +95,24 @@ fn AtomicQueue(comptime T: type) type {
                 self.cond.wait(&self.mutex);
             return buf[0];
         }
+
+        /// reads and dequeus T. Not Blocking, returns an optional
+        pub fn tryDequeueElem(self: *@This()) ?T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            var buf: [1]T = undefined;
+            if (self.queue.read(buf[0..]) == 0)
+                return null;
+            return buf[0];
+        }
     };
 }
 
+// The queue types for shared data accross threads
 const Tasks = AtomicQueue(PieceTask);
 const Results = AtomicQueue(PieceCompleted);
+const PeersQueue = AtomicQueue(std.net.Ip4Address);
 
 const MetaInfoError = error{
     FileNotFound,
@@ -202,10 +215,9 @@ pub const MetaInfo = struct {
         const peers = try Tracker.getPeersFromResponse(allocator, self.*);
         defer allocator.free(peers);
 
+        // atomic queue that hold the tasks to complete
         var tasks = Tasks.init(allocator);
         defer tasks.deinit();
-
-        // Fill in piece tasks
         try tasks.queue.ensureTotalCapacity(self.info.pieces.len);
         for (self.info.pieces, 0..) |piece, i| {
             try tasks.enqueueElem(PieceTask{
@@ -219,20 +231,27 @@ pub const MetaInfo = struct {
         var res = Results.init(allocator);
         defer res.deinit();
 
+        // atomic queue that will hold all available peers
+        var peers_queue = PeersQueue.init(allocator);
+        defer peers_queue.deinit();
+        for (peers) |peer| {
+            try peers_queue.enqueueElem(peer);
+        }
+
         // Spawn workers
         const num_workers: u64 = @min(self.info.pieces.len, try Thread.getCpuCount() * 2, peers.len);
         var pool: Thread.Pool = undefined;
         try pool.init(.{ .allocator = allocator, .n_jobs = num_workers });
         defer pool.deinit();
         var wg: Thread.WaitGroup = .{};
+
         for (0..num_workers) |_| {
-            const peer = peers[std.crypto.random.intRangeAtMost(usize, 0, peers.len - 1)];
             const ctx: *Context = try allocator.create(Context);
 
             ctx.* = .{
                 .meta = self,
                 .allocator = allocator,
-                .peer = peer,
+                .peers = &peers_queue,
                 .tasks = &tasks,
                 .results = &res,
             };
@@ -281,58 +300,64 @@ pub const MetaInfo = struct {
     pub fn downloadWorker(
         self: @This(),
         allocator: Allocator,
-        peer: std.net.Ip4Address,
+        peers: *PeersQueue,
         tasks: *Tasks,
         results: *Results,
     ) !void {
-        var client = Client.new(
-            allocator,
-            peer,
-            "-qB6666-weoiuv8324ns".*,
-            self,
-        ) catch {
-            try stderr.print("Could not handshake with {}\n", .{peer});
-            return;
-        };
-        defer client.deinit(allocator);
+        // peer selection
+        outer: while (peers.tryDequeueElem()) |peer| {
+            var client = Client.new(allocator, peer, "-qB6666-weoiuv8324ns".*, self) catch |err| {
+                switch (err) {
+                    error.ConnectToPeerFailed => stderr.print("Connection to peer failed\n", .{}) catch {},
+                    error.MessageReadFailed => stderr.print("Message with peer failed\n", .{}) catch {},
+                    error.MissingBitfield => stderr.print("Missing bitfield with peer\n", .{}) catch {},
+                }
+                continue; // we consume the peer
+            };
+            defer client.deinit(allocator);
 
-        try client.sendUnchoke();
-        try client.sendInterested();
+            try client.sendUnchoke();
+            try client.sendInterested();
 
-        while (!tasks.isEmpty()) {
-            const task: PieceTask = tasks.dequeueElem();
+            while (tasks.tryDequeueElem()) |task| {
+                // if client doesnt have the piece, requeue it
+                if (!try client.hasPiece(task.index)) {
+                    try stdout.print("Peer {} doesnt have piece {}, choosing other\n", .{ peer, task.index });
+                    try tasks.enqueueElem(task);
+                    try peers.enqueueElem(peer);
+                    client.deinit(allocator);
+                    continue :outer;
+                }
 
-            // if client doesnt have the piece, requeue it
-            if (!try client.hasPiece(task.index)) {
-                try tasks.enqueueElem(task);
-                continue;
+                // allocate mem for the piece
+                const piece_buffer = try allocator.alloc(u8, task.length);
+                const piece_downloaded: bool = try downloadPiece(
+                    allocator,
+                    &client,
+                    task,
+                    piece_buffer,
+                );
+
+                if (!piece_downloaded) {
+                    try tasks.enqueueElem(task);
+                    allocator.free(piece_buffer);
+                    continue; // try other task
+                }
+
+                if (!checkIntegrity(task, piece_buffer)) {
+                    stderr.print("Piece {} failed integrity\n", .{task.index}) catch {};
+                    try tasks.enqueueElem(task);
+                    continue;
+                }
+
+                try client.sendHave(task.index);
+
+                // Success: enqueue the result
+                try results.enqueueElem(PieceCompleted{
+                    .index = task.index,
+                    .buf = piece_buffer,
+                });
             }
-
-            // allocate mem for the piece
-            const piece_buffer = try allocator.alloc(u8, task.length);
-            const piece_downloaded: bool = try downloadPiece(
-                allocator,
-                &client,
-                task,
-                piece_buffer,
-            );
-
-            if (!piece_downloaded) {
-                try tasks.enqueueElem(task); // try again later
-                continue;
-            }
-
-            if (!checkIntegrity(task, piece_buffer)) {
-                stderr.print("Piece {} failed integrity\n", .{task.index}) catch {};
-                try tasks.enqueueElem(task);
-                continue;
-            }
-
-            // Success: enqueue the result
-            try results.enqueueElem(PieceCompleted{
-                .index = task.index,
-                .buf = piece_buffer,
-            });
         }
     }
 
@@ -447,7 +472,7 @@ pub const MetaInfo = struct {
 
 /// wrapper so it can be used by a thread (direct function pointer, not attached to an instance)
 fn downloadWorkerThreadFn(ctx: *Context) void {
-    ctx.meta.downloadWorker(ctx.allocator, ctx.peer, ctx.tasks, ctx.results) catch |err| {
+    ctx.meta.downloadWorker(ctx.allocator, ctx.peers, ctx.tasks, ctx.results) catch |err| {
         stderr.print("Error with thread worker, msg: {?}\n", .{err}) catch {};
     };
 }

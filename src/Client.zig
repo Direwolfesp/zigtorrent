@@ -24,11 +24,15 @@ pub const Client = struct {
         peer_id: [20]u8,
         meta: MetaInfo,
     ) !@This() {
-        const conn = try Peer.connectToPeer(peer_ip, peer_id, meta);
+        const conn = Peer.connectToPeer(peer_ip, peer_id, meta) catch {
+            return error.ConnectToPeerFailed;
+        };
 
         // received bitfield
-        const bf: Message = try Message.read(allocator, conn.reader());
-        if (bf != .bitfield) return error.ClientConnFailed;
+        const bf: Message = Message.read(allocator, conn.reader()) catch {
+            return error.MessageReadFailed;
+        };
+        if (bf != .bitfield) return error.MissingBitfield;
 
         return .{
             .conn = conn,
