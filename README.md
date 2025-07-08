@@ -9,6 +9,8 @@
 - Multithreaded (works but is a bit experimental)
 
 ## Todo
+- Better piece selection
+- Better peer selection and keeping track of them
 - More testing (ie. torrents such as ubuntu iso don't work)
 - Multifile torrents
 - Magnet links
