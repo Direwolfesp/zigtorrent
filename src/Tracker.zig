@@ -20,45 +20,30 @@ pub const RequestParams = struct {
 
     /// Construct query params in encoded URI
     pub fn toURI(self: @This(), query: *std.ArrayList(u8), allocator: Allocator) !std.Uri {
-        try query.appendSlice(self.announce);
-        try query.append('?');
-
-        try query.appendSlice("info_hash=");
-        const hsh = try std.fmt.allocPrint(allocator, "{%}", .{
-            std.Uri.Component{ .raw = &self.info_hash },
-        });
-        try query.appendSlice(hsh);
+        const hsh = try std.fmt.allocPrint(allocator, "{%}", .{std.Uri.Component{ .raw = &self.info_hash }});
         defer allocator.free(hsh);
 
-        try query.appendSlice("&peer_id=");
-        try query.appendSlice(self.peer_id);
+        const url = try std.fmt.allocPrint(allocator, "{s}?" ++
+            "info_hash={s}" ++
+            "&peer_id={s}" ++
+            "&port={d}" ++
+            "&uploaded={d}" ++
+            "&downloaded={d}" ++
+            "&left={d}" ++
+            "&compact={d}", .{
+            self.announce,
+            hsh,
+            self.peer_id,
+            self.port,
+            self.uploaded,
+            self.downloaded,
+            self.left,
+            self.compact,
+        });
+        defer allocator.free(url);
+        try query.appendSlice(url);
 
-        try query.appendSlice("&port=");
-        const prt = try std.fmt.allocPrint(allocator, "{d}", .{self.port});
-        try query.appendSlice(prt);
-        defer allocator.free(prt);
-
-        try query.appendSlice("&uploaded=");
-        const up = try std.fmt.allocPrint(allocator, "{d}", .{self.uploaded});
-        try query.appendSlice(up);
-        defer allocator.free(up);
-
-        try query.appendSlice("&downloaded=");
-        const dl = try std.fmt.allocPrint(allocator, "{d}", .{self.downloaded});
-        try query.appendSlice(dl);
-        defer allocator.free(dl);
-
-        try query.appendSlice("&left=");
-        const lft = try std.fmt.allocPrint(allocator, "{d}", .{self.left});
-        try query.appendSlice(lft);
-        defer allocator.free(lft);
-
-        try query.appendSlice("&compact=");
-        const cmpct = try std.fmt.allocPrint(allocator, "{d}", .{self.compact});
-        try query.appendSlice(cmpct);
-        defer allocator.free(cmpct);
-
-        return try std.Uri.parse(query.items);
+        return try std.Uri.parse(try query.toOwnedSlice());
     }
 };
 

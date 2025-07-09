@@ -10,6 +10,7 @@ const Bencode = @import("Bencode.zig");
 const Tracker = @import("Tracker.zig");
 const Client = @import("Client.zig").Client;
 const Message = @import("Messages.zig").Message;
+const Peer = @import("Peer.zig");
 
 const Context = struct {
     meta: *MetaInfo,
@@ -288,7 +289,7 @@ pub const MetaInfo = struct {
         var client = try Client.new(
             allocator,
             peer,
-            "-qB6666-weoiuv8324ns".*,
+            Peer.ID,
             self,
         );
         defer client.deinit(allocator);
@@ -296,7 +297,7 @@ pub const MetaInfo = struct {
         try client.sendUnchoke();
         try client.sendInterested();
 
-        while (!tasks.isEmpty()) {
+        while (!tasks.isEmpty()) { // TOCTOU ??
             const task: PieceTask = tasks.dequeueElem();
 
             // if client doesnt have the piece, requeue it

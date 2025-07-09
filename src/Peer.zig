@@ -18,6 +18,8 @@ const stderr = std.io.getStdErr().writer();
 // https://wiki.theory.org/BitTorrentSpecification#Peer_wire_protocol_.28TCP.29
 //-----------------------------------------------------------------------------
 
+pub const ID = "-ZIG666-weoiuv8324ns".*;
+
 pub const HandShake = extern struct {
     // layout matters
     pstrlen: u8 align(1) = 19,
