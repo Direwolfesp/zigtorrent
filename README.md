@@ -1,6 +1,6 @@
 # zigtorrent
 
-'Toy' Bittorrenct (original spec) CLI client that serves as a learning proyect for myself so its not expected to work optimally.  
+Toy Bittorrent (original spec) CLI client that serves as a learning proyect for myself so its not expected to work optimally.  
 
 ## Features
 - Download a piece
