@@ -28,7 +28,7 @@ pub const HandShake = extern struct {
     info_hash: [20]u8 align(1) = undefined,
     peer_id: [20]u8 align(1) = undefined,
 
-    pub fn create(peer_id: [20]u8, meta: MetaInfo) HandShake {
+    pub fn create(peer_id: [20]u8, meta: *const MetaInfo) HandShake {
         return HandShake{
             .info_hash = meta.info_hash,
             .peer_id = peer_id,
@@ -37,7 +37,7 @@ pub const HandShake = extern struct {
 };
 
 /// Connects to the given peer and returns the net.Stream
-pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: MetaInfo) !std.net.Stream {
+pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !std.net.Stream {
     var conn = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer_ip });
     const hndshk = HandShake.create(peer_id, meta);
     try conn.writer().writeStruct(hndshk);
@@ -53,7 +53,7 @@ pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: MetaInf
 }
 
 /// Parses peers from a torrent in dictionary form and returns the ips
-pub fn parsePeersDict(allocator: Allocator, data: std.ArrayList(Bencode.Value)) ![]std.net.Ip4Address {
+pub fn parsePeersDict(allocator: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]std.net.Ip4Address {
     var peers = std.ArrayList(std.net.Ip4Address).init(allocator);
     defer peers.deinit();
     try peers.ensureTotalCapacityPrecise(data.items.len);

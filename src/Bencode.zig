@@ -27,7 +27,7 @@ pub const Value = union(enum) {
 
     /// Givan a Value -> JSON string
     pub fn format(
-        self: @This(),
+        self: *const @This(),
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
@@ -118,8 +118,8 @@ pub const Value = union(enum) {
     }
 
     /// Returns the Bencoded string from a BencodedValue
-    pub fn encodeBencode(self: @This(), string: *std.ArrayList(u8)) !void {
-        switch (self) {
+    pub fn encodeBencode(self: *const @This(), string: *std.ArrayList(u8)) !void {
+        switch (self.*) {
             .string => |str| {
                 try std.json.stringify(str.len, .{}, string.writer());
                 try string.append(':');

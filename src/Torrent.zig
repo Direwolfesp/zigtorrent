@@ -200,7 +200,7 @@ pub const MetaInfo = struct {
     /// Downloads a torrent file into ofile
     /// returns true in success, false otherwise
     pub fn download(self: *MetaInfo, allocator: Allocator, ofile: []const u8) !bool {
-        const peers = try Tracker.getPeersFromResponse(allocator, self.*);
+        const peers = try Tracker.getPeersFromResponse(allocator, self);
         defer allocator.free(peers);
 
         var tasks = Tasks.init(allocator);
@@ -258,7 +258,7 @@ pub const MetaInfo = struct {
             allocator.free(piece_res.buf);
 
             const percent: f64 = @as(f64, @floatFromInt(pieces_downloaded)) / @as(f64, @floatFromInt(self.info.pieces.len)) * 100.0;
-            try stdout.print("[{d:.2}%] Downloaded piece #{d}. {} of {}\n", .{
+            try stdout.print("[{d:0>5.2}%] Downloaded piece #{d}. {} of {}\n", .{
                 percent,
                 piece_res.index,
                 pieces_downloaded,
@@ -280,7 +280,7 @@ pub const MetaInfo = struct {
     }
 
     pub fn downloadWorker(
-        self: @This(),
+        self: *const @This(),
         allocator: Allocator,
         peer: std.net.Ip4Address,
         tasks: *Tasks,
@@ -311,7 +311,7 @@ pub const MetaInfo = struct {
             const piece_downloaded: bool = try downloadPiece(
                 allocator,
                 &client,
-                task,
+                &task,
                 piece_buffer,
             );
 
@@ -320,7 +320,9 @@ pub const MetaInfo = struct {
                 continue;
             }
 
-            if (!checkIntegrity(task, piece_buffer)) {
+            if (!checkIntegrity(&task, piece_buffer)) {
+                std.debug.lockStdErr();
+                defer std.debug.unlockStdErr();
                 stderr.print("Piece {} failed integrity\n", .{task.index}) catch {};
                 try tasks.enqueueElem(task);
                 continue;
@@ -338,7 +340,7 @@ pub const MetaInfo = struct {
 
     /// Checks if the downloaded piece in ´buf´ has the same
     /// hash as the ´task´.
-    fn checkIntegrity(task: PieceTask, buf: []const u8) bool {
+    fn checkIntegrity(task: *const PieceTask, buf: []const u8) bool {
         var hash = Sha1.init(.{});
         hash.update(buf);
         const result = hash.finalResult();
@@ -348,10 +350,10 @@ pub const MetaInfo = struct {
     fn downloadPiece(
         allocator: Allocator,
         client: *Client,
-        task: PieceTask,
+        task: *const PieceTask,
         buf: []u8, // will be filled with the downloaded piece
     ) !bool {
-        const MAX_BACKLOG: usize = 10; // requests pipeline length
+        const MAX_BACKLOG: usize = 20; // requests pipeline length
         var downloaded: usize = 0;
         var requested: usize = 0;
         var backlog: usize = 0;
@@ -399,7 +401,7 @@ pub const MetaInfo = struct {
     /// calculate the piece length according to the index,
     /// the last index might get a piece smaller than the other pieces
     /// this is only necesary one per piece
-    pub fn calculatePieceSize(self: @This(), index: usize) !i64 {
+    pub fn calculatePieceSize(self: *const @This(), index: usize) !i64 {
         const num_whole_pieces = try std.math.divFloor(
             i64,
             self.info.length,
@@ -412,7 +414,7 @@ pub const MetaInfo = struct {
     }
 
     /// Prints meta info contents to stdout
-    pub fn printMetaInfo(self: @This()) !void {
+    pub fn printMetaInfo(self: *const @This()) !void {
         try stdout.print(
             \\Tracker URL: {s}
             \\Torrent Name: {s}
@@ -432,7 +434,7 @@ pub const MetaInfo = struct {
         try self.printPieceHashes();
     }
 
-    fn printPieceHashes(self: @This()) !void {
+    fn printPieceHashes(self: *const @This()) !void {
         try stdout.print("Piece Hashes: \n", .{});
         for (self.info.pieces, 0..) |piece_hash, i| {
             const hex = std.fmt.fmtSliceHexLower(&piece_hash);
@@ -448,7 +450,9 @@ pub const MetaInfo = struct {
 /// wrapper so it can be used by a thread (direct function pointer, not attached to an instance)
 fn downloadWorkerThreadFn(ctx: *Context) void {
     ctx.meta.downloadWorker(ctx.allocator, ctx.peer, ctx.tasks, ctx.results) catch |err| {
-        stderr.print("Error with thread worker, msg: {?}\n", .{err}) catch {};
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        stderr.print("Error with worker thread. id: {any}, msg: {?}\n", .{ std.Thread.getCurrentId(), err }) catch {};
     };
 }
 

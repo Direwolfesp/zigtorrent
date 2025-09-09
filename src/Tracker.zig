@@ -19,7 +19,7 @@ pub const RequestParams = struct {
     compact: u8 = 1,
 
     /// Construct query params in encoded URI
-    pub fn toURI(self: @This(), query: *std.ArrayList(u8), allocator: Allocator) !std.Uri {
+    pub fn toURI(self: *const @This(), query: *std.ArrayList(u8), allocator: Allocator) !std.Uri {
         const hsh = try std.fmt.allocPrint(allocator, "{%}", .{std.Uri.Component{ .raw = &self.info_hash }});
         defer allocator.free(hsh);
 
@@ -48,7 +48,7 @@ pub const RequestParams = struct {
 };
 
 /// constructs a request based on metainfo
-fn createRequest(meta: MetaInfo) RequestParams {
+fn createRequest(meta: *const MetaInfo) RequestParams {
     return RequestParams{
         .info_hash = meta.info_hash,
         .left = meta.info.length,
@@ -60,7 +60,7 @@ fn createRequest(meta: MetaInfo) RequestParams {
 /// and returns the `Bencode.ValueManaged` response.
 /// -> `meta` is the MetaInfo struct from the file
 /// -> `allocator` caller owns the returned memory.
-fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueManaged {
+fn getResponse(allocator: std.mem.Allocator, meta: *const MetaInfo) !Bencode.ValueManaged {
     // MetaInfo -> RequestParams -> Response
 
     // request Params and create URI
@@ -87,9 +87,12 @@ fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueManag
     // make request
     try req.send();
     try req.finish();
+    try stdout.print("tracker response: ⏳️", .{});
     try req.wait();
     if (req.response.status != .ok)
         return error.RequestFailed;
+
+    try stdout.print("\rtracker response: ✔️\n", .{});
 
     // read the bencoded response body
     const body: []u8 = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
@@ -108,16 +111,16 @@ fn getResponse(allocator: std.mem.Allocator, meta: MetaInfo) !Bencode.ValueManag
 
 /// Parses the peer ips from the response of the tracker.
 /// Caller owns the returned memory.
-pub fn getPeersFromResponse(allocator: std.mem.Allocator, meta: MetaInfo) ![]Ip4Address {
+pub fn getPeersFromResponse(allocator: std.mem.Allocator, meta: *const MetaInfo) ![]Ip4Address {
     var resp_managed = try getResponse(allocator, meta);
     defer resp_managed.deinit(allocator);
 
-    const response = resp_managed.value;
-    const peer: Bencode.Value = response.dict.get("peers") orelse return error.PeersNotFound;
+    const peer: Bencode.Value = resp_managed.value.dict.get("peers") orelse
+        return error.PeersNotFound;
 
     return switch (peer) {
         .string => |str| try Peer.parsePeersBinary(allocator, str),
-        .list => |list| try Peer.parsePeersDict(allocator, list),
+        .list => |list| try Peer.parsePeersDict(allocator, &list),
         else => error.InvalidPeers,
     };
 }

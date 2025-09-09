@@ -22,12 +22,10 @@ pub const Client = struct {
         allocator: Allocator,
         peer_ip: std.net.Ip4Address,
         peer_id: [20]u8,
-        meta: MetaInfo,
-    ) !@This() {
-        const conn = Peer.connectToPeer(peer_ip, peer_id, meta) catch {
-            stderr.print("Handshake failed with peer {}", .{peer_ip}) catch {};
+        meta: *const MetaInfo,
+    ) !Client {
+        const conn = Peer.connectToPeer(peer_ip, peer_id, meta) catch
             return error.HandShakeFailed;
-        };
 
         // received bitfield
         const bf: Message = try Message.read(allocator, conn.reader());
@@ -42,12 +40,12 @@ pub const Client = struct {
         };
     }
 
-    pub fn deinit(self: @This(), allocator: Allocator) void {
+    pub fn deinit(self: *const Client, allocator: Allocator) void {
         self.conn.close();
         self.bitfield.deinit(allocator);
     }
 
-    pub fn hasPiece(self: @This(), index: u32) !bool {
+    pub fn hasPiece(self: *const Client, index: u32) !bool {
         const byte_index = index / 8;
         if (byte_index < 0 or byte_index >= self.bitfield.bitfield.len)
             return error.InvalidPieceIndex;
@@ -55,7 +53,7 @@ pub const Client = struct {
         return 1 == ((self.bitfield.bitfield[byte_index] >> (7 - byte_offset)) & 1);
     }
 
-    pub fn setPiece(self: *@This(), index: u32) !void {
+    pub fn setPiece(self: *Client, index: u32) !void {
         const byte_index = index / 8;
         if (byte_index < 0 or byte_index >= self.bitfield.bitfield.len)
             return error.InvalidPieceIndex;
@@ -63,7 +61,7 @@ pub const Client = struct {
         self.bitfield.bitfield[byte_index] |= (@as(u8, 1) << (7 - byte_offset));
     }
 
-    pub fn sendRequest(self: @This(), index: u32, begin: u32, length: u32) !void {
+    pub fn sendRequest(self: *const Client, index: u32, begin: u32, length: u32) !void {
         const rqst = Message{ .request = .{
             .begin = begin,
             .index = index,
@@ -72,20 +70,29 @@ pub const Client = struct {
         try rqst.write(self.conn.writer());
     }
 
-    pub fn sendInterested(self: @This()) !void {
+    pub fn sendInterested(self: *const Client) !void {
         try Messages.Interested.write(self.conn.writer());
     }
 
-    pub fn sendNotInterested(self: @This()) !void {
+    pub fn sendNotInterested(self: *const Client) !void {
         try Messages.NotInterested.write(self.conn.writer());
     }
 
-    pub fn sendUnchoke(self: @This()) !void {
+    pub fn sendUnchoke(self: *const Client) !void {
         try Messages.Unchoke.write(self.conn.writer());
     }
 
-    pub fn sendHave(self: @This(), index: u32) !void {
+    pub fn sendHave(self: *const Client, index: u32) !void {
         const have = Message{ .have = .{ .piece_index = index } };
         try have.write(self.conn.writer());
+    }
+
+    pub fn sendCancel(self: *const Client, index: u32, begin: u32, length: u32) !void {
+        const cancel = Message{ .cancel = .{
+            .index = index,
+            .begin = begin,
+            .length = length,
+        } };
+        try cancel.write(self.conn.writer());
     }
 };
