@@ -14,7 +14,7 @@ pub fn main() !void {
     const i_file: []const u8 = if (args.len >= 2)
         args[1]
     else
-        @panic("Expected a torrent file as first parameter\n");
+        std.debug.panic("Expected a torrent file as first parameter\n", .{});
 
     var torrent = Torrent.open(allocator, i_file) catch return;
     defer torrent.deinit(allocator);
