@@ -61,7 +61,7 @@ pub fn parsePeersDict(allocator: Allocator, data: *const std.ArrayList(Bencode.V
     for (data.items) |d| {
         if (d != .dict) return error.ParsePeersDict;
 
-        const dict = d.dict;
+        const dict = &d.dict;
         const addr = try std.net.Address.resolveIp(
             dict.get("ip").?.string,
             @intCast(dict.get("port").?.integer),
@@ -78,18 +78,14 @@ pub fn parsePeersBinary(allocator: Allocator, data: []const u8) ![]std.net.Ip4Ad
     if (data.len % 6 != 0) return error.InvalidPeers;
     var peers = std.ArrayList(std.net.Ip4Address).init(allocator);
     defer peers.deinit();
+    try peers.ensureTotalCapacityPrecise(data.len / 6);
 
     var i: usize = 0;
     while (i + 5 < data.len) : (i += 6) {
-        const ip: []const u8 = data[i .. i + 4];
         const port: u16 = std.mem.readInt(u16, data[i + 4 .. i + 6][0..2], .big);
-
-        var ipa: [4]u8 = undefined;
-        inline for (0..4) |j|
-            ipa[j] = ip[j];
-
-        const address = std.net.Address.initIp4(ipa, port);
-        try peers.append(address.in);
+        const ip: [4]u8 = data[i .. i + 4][0..4].*;
+        const address = std.net.Address.initIp4(ip, port);
+        peers.appendAssumeCapacity(address.in);
     }
     return peers.toOwnedSlice();
 }
