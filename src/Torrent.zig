@@ -1,485 +1,401 @@
 const std = @import("std");
 const Sha1 = std.crypto.hash.Sha1;
 const Allocator = std.mem.Allocator;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expect = std.testing.expect;
 
-const stdout = std.io.getStdOut().writer();
-const stderr = std.io.getStdErr().writer();
-const Thread = std.Thread;
+const ansi = @import("ansi.zig");
+const reset = ansi.reset;
+const bencode = @import("bencode.zig");
+const Value = bencode.Value;
 
-const Bencode = @import("Bencode.zig");
-const Tracker = @import("Tracker.zig");
-const Client = @import("Client.zig").Client;
-const Message = @import("Messages.zig").Message;
-const Peer = @import("Peer.zig");
+const title_style = ansi.bold ++ ansi.blue;
+const content_style = ansi.brightWhite ++ ansi.dim;
 
-const Context = struct {
-    meta: *MetaInfo,
-    allocator: Allocator,
-    peer: std.net.Ip4Address,
-    tasks: *Tasks,
-    results: *Results,
-};
-
-const PieceTask = struct {
-    /// piece index
-    index: u32,
-    /// piece hash
-    hash: [20]u8,
-    /// effective length of the piece
-    length: u32,
-};
-
-const PieceCompleted = struct {
-    /// index of the downloaded piece
-    index: u32,
-    /// its contents
-    buf: []const u8,
-};
-
-const PieceStatus = struct {
-    index: u32,
-    client: *Client,
-    requested: u32,
-    downloaded: u32,
-    pipeline_length: u32,
-};
-
-/// Data type that hold a fifo queue protected by a mutex and condition.
-/// With blocking I/O.
-fn AtomicQueue(comptime T: type) type {
-    return struct {
-        queue: std.fifo.LinearFifo(T, .Dynamic),
-        mutex: Thread.Mutex,
-        cond: Thread.Condition,
-
-        /// Caller owns the returned memory, call deinit()
-        pub fn init(allocator: Allocator) @This() {
-            return .{
-                .mutex = .{},
-                .cond = .{},
-                .queue = std.fifo.LinearFifo(T, .Dynamic).init(allocator),
-            };
-        }
-
-        pub fn deinit(self: @This()) void {
-            self.queue.deinit();
-        }
-
-        pub fn isEmpty(self: *@This()) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            return self.queue.count == 0;
-        }
-
-        pub fn getCount(self: *@This()) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            return self.queue.count;
-        }
-
-        /// Enqueues T
-        pub fn enqueueElem(self: *@This(), elem: T) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            const e: [1]T = .{elem};
-            _ = try self.queue.write(e[0..]);
-            self.cond.signal();
-        }
-
-        /// reads and dequeus T. Blocking
-        pub fn dequeueElem(self: *@This()) T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            var buf: [1]T = undefined;
-            while (self.queue.read(buf[0..]) == 0)
-                self.cond.wait(&self.mutex);
-            return buf[0];
-        }
-    };
-}
-
-const Tasks = AtomicQueue(PieceTask);
-const Results = AtomicQueue(PieceCompleted);
-
-const MetaInfoError = error{
+const TorrentError = error{
     FileNotFound,
     WrongType,
     MisingField,
-    NotSingleFile,
+    IlegalStructure,
 };
 
-/// Torrent file information
-/// Single File Only
-pub const MetaInfo = struct {
-    /// not meant to be accessed directly, this just points to memory created by allocator
-    values: Bencode.Value,
+const TorrentType = enum(u8) {
+    SingleFile,
+    MultiFile,
+};
 
-    /// tracker url
-    announce: []const u8 = undefined,
-    /// info dictionary
-    info: Info,
-    /// hash of the dictionary
-    info_hash: [Sha1.digest_length]u8,
+const stdout = std.fs.File.stdout();
+var stderr = std.fs.File.stderr().writer(&.{});
+const err = &stderr.interface;
 
-    /// Info dictionary for single file
-    const Info = struct {
-        /// number of bytes in each piece
-        piece_length: i64,
-        /// concatenation of all 20-byte SHA1 hash values, one per piece
-        pieces: []const [20]u8,
+const Torrent = @This();
+
+/// contents memory
+value: bencode.Value,
+/// tracker url
+announce: []const u8 = undefined,
+/// creation time of the torrent, in standard UNIX epoch format
+creation_date: ?i64,
+/// free-form textual comments of the author
+comment: ?[]const u8,
+/// name and version of the program used to create the .torrent
+created_by: ?[]const u8,
+/// info dictionary
+info: Info,
+/// hash of the info dictionary
+info_hash: [Sha1.digest_length]u8,
+
+const Info = struct {
+    /// number of bytes in each piece
+    piece_length: i64,
+    /// concatenation of all 20-byte SHA1 hash values, one per piece
+    pieces: []const [20]u8,
+    /// name of the file or directory (depends if its single or multi file)
+    name: []const u8,
+
+    mode: union(enum) {
+        //  ----- Single File -----
         /// length of the file in bytes
         length: i64,
-        /// name of the file
-        name: []const u8,
-    };
 
-    pub fn deinit(self: *@This()) void {
-        self.values.deinit();
-    }
+        //  ----- Multi File -----
+        /// A list of dictionaries, one for each file
+        /// ```
+        /// .list{
+        ///     .dict{
+        ///         length: i64,
+        ///         path: .list{ .string, .string, ...},
+        ///     },
+        ///     .dict{
+        ///         ...
+        ///     },
+        ///     .dict{
+        ///         ...
+        ///     },
+        /// }
+        /// ```
+        files: []File,
+    },
+};
 
-    /// Not meant to be called directly.
-    /// The allocator should hold the backing buffer of the `value`
-    /// thus the need to call deinit
-    fn init(allocator: Allocator, value: Bencode.Value) !MetaInfo {
-        if (value != .dict) return MetaInfoError.WrongType;
-        const metaDict = value.dict;
+const File = struct {
+    /// length of the file in bytes
+    length: i64,
+    /// one or more string elements that together represent the path and filename
+    path: [][]const u8,
 
-        // announce
-        const announce: Bencode.Value = metaDict.get("announce") orelse return MetaInfoError.MisingField;
-        if (announce != .string) return MetaInfoError.WrongType;
-
-        // info
-        const info = metaDict.get("info") orelse return MetaInfoError.MisingField;
-        if (info != .dict) return MetaInfoError.WrongType;
-        const infoDict = info.dict;
-
-        var string = std.ArrayList(u8).init(allocator);
-        defer string.deinit();
-
-        try info.encodeBencode(&string);
-        var sha1 = Sha1.init(.{});
-        sha1.update(string.items);
-
-        // length
-        const length = infoDict.get("length") orelse return MetaInfoError.NotSingleFile;
-        if (length != .integer) return MetaInfoError.WrongType;
-
-        // piece length
-        const piece_length = infoDict.get("piece length") orelse return MetaInfoError.MisingField;
-        if (piece_length != .integer) return MetaInfoError.WrongType;
-
-        // piece hashes
-        const pieces = infoDict.get("pieces") orelse return MetaInfoError.MisingField;
-        if (pieces != .string)
-            return MetaInfoError.WrongType;
-
-        const num_pieces: usize = pieces.string.len / 20;
-        const tmp_piece_hashes: [][20]u8 = try allocator.alloc([20]u8, num_pieces);
-        for (tmp_piece_hashes, 0..) |*hash, i| {
-            hash.* = pieces.string[i * 20 .. i * 20 + 20][0..20].*;
-        }
-
-        // name
-        const name = infoDict.get("name") orelse return MetaInfoError.MisingField;
-        if (name != .string) return MetaInfoError.WrongType;
-
-        return MetaInfo{
-            .values = value,
-            .announce = announce.string,
-            .info = .{
-                .pieces = tmp_piece_hashes,
-                .piece_length = piece_length.integer,
-                .length = length.integer,
-                .name = name.string,
-            },
-            .info_hash = sha1.finalResult(),
-        };
-    }
-
-    /// Downloads a torrent file into ofile
-    /// returns true in success, false otherwise
-    pub fn download(self: *MetaInfo, allocator: Allocator, ofile: []const u8) !bool {
-        const peers = try Tracker.getPeersFromResponse(allocator, self);
-        defer allocator.free(peers);
-
-        var tasks = Tasks.init(allocator);
-        defer tasks.deinit();
-
-        // Fill in piece tasks
-        try tasks.queue.ensureTotalCapacity(self.info.pieces.len);
-        for (self.info.pieces, 0..) |piece_hash, i| {
-            try tasks.enqueueElem(PieceTask{
-                .hash = piece_hash,
-                .index = @intCast(i),
-                .length = @intCast(try self.calculatePieceSize(i)),
-            });
-        }
-
-        // atomic queue that will hold the results procuded by the workers
-        var res = Results.init(allocator);
-        defer res.deinit();
-
-        // Spawn workers
-        const num_workers: u64 = @min(self.info.pieces.len, try Thread.getCpuCount() * 2, peers.len);
-        var pool: Thread.Pool = undefined;
-        try pool.init(.{ .allocator = allocator, .n_jobs = num_workers });
-        defer pool.deinit();
-        var wg: Thread.WaitGroup = .{};
-        for (0..num_workers) |_| {
-            const peer = peers[std.crypto.random.intRangeAtMost(usize, 0, peers.len - 1)];
-            const ctx: *Context = try allocator.create(Context);
-
-            ctx.* = .{
-                .meta = self,
-                .allocator = allocator,
-                .peer = peer,
-                .tasks = &tasks,
-                .results = &res,
-            };
-
-            pool.spawnWg(&wg, downloadWorkerThreadFn, .{ctx});
-        }
-
-        // copy the results into a buffer
-        var buff: []u8 = try allocator.alloc(u8, @intCast(self.info.length));
-        defer allocator.free(buff);
-
-        // main thread will keep reading the result queue and
-        // copy each PieceResult into the buffer
-        var pieces_downloaded: u64 = 0;
-        while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
-            const piece_res: PieceCompleted = res.dequeueElem();
-
-            const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
-            const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
-
-            @memcpy(buff[start..end], piece_res.buf);
-            allocator.free(piece_res.buf);
-
-            const percent: f64 = @as(f64, @floatFromInt(pieces_downloaded)) / @as(f64, @floatFromInt(self.info.pieces.len)) * 100.0;
-            try stdout.print("[{d:0>5.2}%] Downloaded piece #{d}. {} of {}\n", .{
-                percent,
-                piece_res.index,
-                pieces_downloaded,
-                self.info.pieces.len,
-            });
-        }
-
-        // wait for threads
-        wg.wait();
-
-        // copy buffer into file
-        var file = std.fs.cwd().createFile(ofile, .{}) catch |err| {
-            stdout.print("Could not create file '{s}', Err: '{?}'\n", .{ ofile, err }) catch {};
-            return false;
-        };
-        defer file.close();
-        try file.writer().writeAll(buff);
-        return true;
-    }
-
-    pub fn downloadWorker(
-        self: *const @This(),
-        allocator: Allocator,
-        peer: std.net.Ip4Address,
-        tasks: *Tasks,
-        results: *Results,
-    ) !void {
-        var client = try Client.new(
-            allocator,
-            peer,
-            Peer.ID,
-            self,
-        );
-        defer client.deinit(allocator);
-
-        try client.sendUnchoke();
-        try client.sendInterested();
-
-        while (!tasks.isEmpty()) { // TOCTOU ??
-            const task: PieceTask = tasks.dequeueElem();
-
-            // if client doesnt have the piece, requeue it
-            if (!try client.hasPiece(task.index)) {
-                try tasks.enqueueElem(task);
-                continue;
-            }
-
-            // allocate mem for the piece
-            const piece_buffer = try allocator.alloc(u8, task.length);
-            const piece_downloaded: bool = try downloadPiece(
-                allocator,
-                &client,
-                &task,
-                piece_buffer,
-            );
-
-            if (!piece_downloaded) {
-                try tasks.enqueueElem(task); // try again later
-                continue;
-            }
-
-            if (!checkIntegrity(&task, piece_buffer)) {
-                std.debug.lockStdErr();
-                defer std.debug.unlockStdErr();
-                stderr.print("Piece {} failed integrity\n", .{task.index}) catch {};
-                try tasks.enqueueElem(task);
-                continue;
-            }
-
-            try client.sendHave(task.index);
-
-            // Success: enqueue the result
-            try results.enqueueElem(PieceCompleted{
-                .index = task.index,
-                .buf = piece_buffer,
-            });
-        }
-    }
-
-    /// Checks if the downloaded piece in ´buf´ has the same
-    /// hash as the ´task´.
-    fn checkIntegrity(task: *const PieceTask, buf: []const u8) bool {
-        var hash = Sha1.init(.{});
-        hash.update(buf);
-        const result = hash.finalResult();
-        return std.mem.eql(u8, &result, &task.hash);
-    }
-
-    fn downloadPiece(
-        allocator: Allocator,
-        client: *Client,
-        task: *const PieceTask,
-        buf: []u8, // will be filled with the downloaded piece
-    ) !bool {
-        const MAX_BACKLOG: usize = 20; // requests pipeline length
-        var downloaded: usize = 0;
-        var requested: usize = 0;
-        var backlog: usize = 0;
-
-        const deadline = std.time.nanoTimestamp() + std.time.ns_per_s * 30;
-        while (downloaded < task.length) {
-            if (!client.choked) {
-                // request more blocks as long as pipeline is not full and we havent download all blocks
-                while (backlog < MAX_BACKLOG and requested < task.length) {
-                    const block_size = @min(16 * 1024, task.length - requested);
-                    try client.sendRequest(task.index, @intCast(requested), block_size);
-                    requested += block_size;
-                    backlog += 1;
-                }
-            }
-
-            // if the piece is not downloaded in 30sec, abort
-            const now = std.time.nanoTimestamp();
-            if (now > deadline)
-                return false;
-
-            const msg = try Message.read(allocator, client.conn.reader());
-            defer msg.deinit(allocator);
-            switch (msg) {
-                .piece => |p| {
-                    std.debug.assert(p.block.len + p.begin <= buf.len); // received more bytes than available in onepice
-
-                    // NOTE: blocks may not be received in order
-                    const copied = p.block.len;
-                    const offset = p.begin;
-                    @memcpy(buf[offset..][0..copied], p.block[0..copied]);
-
-                    downloaded += copied;
-                    backlog -= 1;
-                },
-                .unchoke => client.choked = false,
-                .choke => client.choked = true,
-                .have => |idx| try client.setPiece(idx.piece_index),
-                else => {},
-            }
-        }
-        return true;
-    }
-
-    /// calculate the piece length according to the index,
-    /// the last index might get a piece smaller than the other pieces
-    /// this is only necesary one per piece
-    pub fn calculatePieceSize(self: *const @This(), index: usize) !i64 {
-        const num_whole_pieces = try std.math.divFloor(
-            i64,
-            self.info.length,
-            self.info.piece_length,
-        );
-        return if (index < num_whole_pieces)
-            self.info.piece_length
-        else
-            self.info.length - num_whole_pieces * self.info.piece_length;
-    }
-
-    /// Prints meta info contents to stdout
-    pub fn printMetaInfo(self: *const @This()) !void {
-        try stdout.print(
-            \\Tracker URL: {s}
-            \\Torrent Name: {s}
-            \\Length: {d}
-            \\Info Hash: {s}
-            \\Total pieces: {d}
-            \\Piece Length: {d}
-            \\
-        , .{
-            self.announce,
-            self.info.name,
-            std.fmt.fmtIntSizeDec(@intCast(self.info.length)),
-            std.fmt.fmtSliceHexLower(&self.info_hash),
-            self.info.pieces.len,
-            std.fmt.fmtIntSizeDec(@intCast(self.info.piece_length)),
-        });
-        try self.printPieceHashes();
-    }
-
-    fn printPieceHashes(self: *const @This()) !void {
-        try stdout.print("Piece Hashes: \n", .{});
-        for (self.info.pieces, 0..) |piece_hash, i| {
-            const hex = std.fmt.fmtSliceHexLower(&piece_hash);
-            try stdout.print("{s}\n", .{hex});
-            if (i > 8) {
-                try stdout.print("...\n", .{});
-                break;
-            }
-        }
+    /// sort-by length decreasing order
+    pub fn ord_func(ctx: void, a: File, b: File) bool {
+        _ = ctx;
+        return a.length > b.length;
     }
 };
 
-/// wrapper so it can be used by a thread (direct function pointer, not attached to an instance)
-fn downloadWorkerThreadFn(ctx: *Context) void {
-    ctx.meta.downloadWorker(ctx.allocator, ctx.peer, ctx.tasks, ctx.results) catch |err| {
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
-        stderr.print("Error with worker thread. id: {any}, msg: {?}\n", .{ std.Thread.getCurrentId(), err }) catch {};
+/// Not meant to be called directly.
+/// The allocator should hold the backing buffer of the `value`
+/// thus the need to call deinit
+fn init(allocator: Allocator, value: bencode.Value) !Torrent {
+    if (value != .dict) return TorrentError.WrongType;
+    const metaDict = &value.dict;
+
+    // announce
+    const announce: bencode.Value = metaDict.get("announce") orelse return TorrentError.MisingField;
+    if (announce != .string) return TorrentError.WrongType;
+
+    // Optional stuff
+    const creation_date: ?i64 = blk: {
+        if (metaDict.get("creation date")) |date| {
+            if (date != .integer) {
+                std.log.err("creation date: expected an integer.\n", .{});
+                return TorrentError.WrongType;
+            }
+            break :blk date.integer;
+        }
+        break :blk null;
     };
+
+    const comment: ?[]const u8 = blk: {
+        if (metaDict.get("comment")) |comm| {
+            if (comm != .string) {
+                std.log.err("comment: expected a string.\n", .{});
+                return TorrentError.WrongType;
+            }
+            break :blk comm.string;
+        }
+        break :blk null;
+    };
+
+    const created_by: ?[]const u8 = blk: {
+        if (metaDict.get("created by")) |created| {
+            if (created != .string) {
+                std.log.err("created by: expected a string.\n", .{});
+                return TorrentError.WrongType;
+            }
+            break :blk created.string;
+        }
+        break :blk null;
+    };
+
+    // info
+    const info = metaDict.get("info") orelse return TorrentError.MisingField;
+    if (info != .dict) return TorrentError.WrongType;
+    const infoDict = &info.dict;
+
+    // info hash
+    var str_alloc = try std.Io.Writer.Allocating.initCapacity(allocator, info.len());
+    defer str_alloc.deinit();
+    const str_writer = &str_alloc.writer;
+    try info.encodeBencode(str_writer);
+    var sha1 = Sha1.init(.{});
+    sha1.update(str_writer.buffer);
+    const info_hash: [Sha1.digest_length]u8 = sha1.finalResult();
+
+    // piece length
+    const piece_length = infoDict.get("piece length") orelse return TorrentError.MisingField;
+    if (piece_length != .integer) return TorrentError.WrongType;
+
+    const pieces = infoDict.get("pieces") orelse return TorrentError.MisingField;
+    if (pieces != .string) return TorrentError.WrongType;
+    const num_pieces: usize = pieces.string.len / 20;
+
+    // piece hashes
+    const piece_hashes: [][20]u8 = try allocator.alloc([20]u8, num_pieces);
+    errdefer allocator.free(piece_hashes);
+
+    for (piece_hashes, 0..) |*hash, i|
+        hash.* = pieces.string[i * 20 .. i * 20 + 20][0..20].*;
+
+    // name
+    const name = infoDict.get("name") orelse return TorrentError.MisingField;
+    if (name != .string) return TorrentError.WrongType;
+
+    // length (Only present in single file)
+    const length: ?i64 = blk: {
+        if (infoDict.get("length")) |l| {
+            if (l != .integer) {
+                std.log.err("length: expected an integer.\n", .{});
+                return TorrentError.WrongType;
+            }
+            break :blk l.integer;
+        }
+        break :blk null;
+    };
+
+    // files (Only present in multiple file)
+    const files: ?[]File = blk: {
+        const f = infoDict.get("files") orelse break :blk null;
+        if (f != .list) std.log.err("files: expected a list", .{});
+
+        const file_list = &f.list;
+        var files = try allocator.alloc(File, file_list.items.len);
+
+        for (file_list.items, 0..) |file_dict, i| {
+            std.debug.assert(file_dict == .dict);
+            const file = &file_dict.dict;
+
+            const file_length = file.get("length").?.integer;
+            const list_of_paths = file.get("path") orelse return TorrentError.MisingField;
+            std.debug.assert(list_of_paths == .list);
+
+            const paths: [][]const u8 = try allocator.alloc([]const u8, list_of_paths.list.items.len);
+            for (list_of_paths.list.items, 0..) |path_component, j| {
+                std.debug.assert(path_component == .string);
+                paths[j] = path_component.string;
+            }
+
+            files[i] = File{
+                .length = file_length,
+                .path = paths,
+            };
+        }
+        break :blk files;
+    };
+
+    return Torrent{
+        .value = value,
+        .announce = announce.string,
+        .creation_date = creation_date,
+        .comment = comment,
+        .created_by = created_by,
+        .info_hash = info_hash,
+        .info = .{
+            .piece_length = piece_length.integer,
+            .pieces = piece_hashes,
+            .name = name.string,
+            .mode = if (files != null and length == null)
+                .{ .files = files.? }
+            else if (files == null and length != null)
+                .{ .length = length.? }
+            else
+                @panic("Torrentfile can't be single and multifile at the same time.\n"),
+        },
+    };
+}
+
+pub fn deinit(self: *Torrent, alloc: Allocator) void {
+    alloc.free(self.info.pieces);
+
+    if (self.getType() == .MultiFile) {
+        for (self.info.mode.files) |file|
+            alloc.free(file.path);
+        alloc.free(self.info.mode.files);
+    }
+
+    self.value.deinit(alloc);
+}
+
+pub fn getType(self: *const Torrent) TorrentType {
+    return switch (self.info.mode) {
+        .files => .MultiFile,
+        .length => .SingleFile,
+    };
+}
+
+/// calculate the piece length according to the index,
+/// the last index might get a piece smaller than the other pieces
+/// this is only necesary one per piece
+pub fn calculatePieceSize(self: *const Torrent, index: usize) !i64 {
+    const num_whole_pieces = try std.math.divFloor(
+        i64,
+        self.info.length,
+        self.info.piece_length,
+    );
+    std.debug.assert(index >= 0 and index <= num_whole_pieces);
+    return if (index < num_whole_pieces)
+        self.info.piece_length
+    else
+        self.info.length - num_whole_pieces * self.info.piece_length;
 }
 
 /// Parses the given torrent file and retreives its contents.
 /// Caller owns the returned memory. (call deinit())
-pub fn open(allocator: Allocator, path: []const u8) !MetaInfoManaged {
-    var file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        try stdout.print("Could not open file '{s}', error: {?}", .{ path, err });
-        return MetaInfoError.FileNotFound;
+pub fn open(allocator: Allocator, path: []const u8) !TorrentManaged {
+    var file = std.fs.cwd().openFile(path, .{}) catch |e| {
+        try err.print("Could not open file '{s}'. Error: {t}\n", .{ path, e });
+        std.process.exit(1);
     };
     defer file.close();
+
     const contents: []const u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    const bencode = try Bencode.decodeBencode(allocator, contents);
+    var b: Value = bencode.decodeBencode(allocator, contents) catch |e| {
+        try err.print("Could not parse bencode contents from file '{s}'\n", .{path});
+        return e;
+    };
+    errdefer b.deinit(allocator);
+
     return .{
-        .meta = try MetaInfo.init(allocator, bencode),
+        .meta = try Torrent.init(allocator, b),
         .backing_buff = contents,
     };
 }
 
 /// Meta Info File that owns its underlaying memory.
 /// Must call deinit.
-pub const MetaInfoManaged = struct {
-    meta: MetaInfo,
+pub const TorrentManaged = struct {
+    meta: Torrent,
     backing_buff: []const u8,
 
-    pub fn deinit(self: *@This(), allocator: Allocator) void {
+    pub fn deinit(self: *TorrentManaged, allocator: Allocator) void {
         allocator.free(self.backing_buff);
-        self.meta.deinit();
+        self.meta.deinit(allocator);
     }
 };
+
+/// Prints information about the torrent into a writer
+pub fn printMetaInfo(self: *const Torrent, alloc: Allocator, out: *std.Io.Writer) !void {
+    const torr_type = self.getType();
+
+    // Basic content
+    try print_row(out, " > Torrent name:", "{s}\n", .{self.info.name});
+    try print_row(out, " > Tracker URL:", "{s}\n", .{self.announce});
+    try print_row(out, " > Info hash: ", "{x}\n", .{self.info_hash});
+    try print_row(out, " > Pieces: ", "{d}\n", .{self.info.pieces.len});
+    try print_row(out, " > Piece length: ", "{B}\n", .{@as(u64, @intCast(self.info.piece_length))});
+
+    // Optional stuff
+    if (self.creation_date) |date| {
+        var es = std.time.epoch.EpochSeconds{ .secs = @intCast(date) };
+        const day = es.getEpochDay();
+        const day_info = day.calculateYearDay();
+        const month_info = day_info.calculateMonthDay();
+        const sec_of_day = es.getDaySeconds();
+
+        // YYYY-MM-DD HH:MM:SS
+        const date_fmt = try std.fmt.allocPrint(alloc, "{d:04}-{d:02}-{d:02} {d:02}:{d:02}:{d:02}", .{
+            day_info.year,
+            month_info.month.numeric(),
+            month_info.day_index + 1,
+            sec_of_day.getHoursIntoDay(),
+            sec_of_day.getMinutesIntoHour(),
+            sec_of_day.getSecondsIntoMinute(),
+        });
+        defer alloc.free(date_fmt);
+        try print_row(out, " > Creation date:", "{s}\n", .{date_fmt});
+    }
+
+    if (self.comment) |comment|
+        try print_row(out, " > Comment:", "{s}\n", .{comment});
+
+    if (self.created_by) |created_by|
+        try print_row(out, " > Created by:", "{s}\n", .{created_by});
+
+    if (torr_type == .SingleFile) {
+        try print_row(out, " > Size:", "{B}\n", .{@as(u64, @intCast(self.info.mode.length))});
+    } else if (torr_type == .MultiFile) {
+        try out.print("{s} > Multi-file:{s}\n", .{ title_style, reset });
+
+        std.mem.sort(File, self.info.mode.files, {}, File.ord_func);
+        for (self.info.mode.files) |file| {
+            // size and first component
+            try out.print("- {s}[{B:^10.2}] {s}/", .{
+                content_style,
+                @as(u64, @intCast(file.length)),
+                self.info.name,
+            });
+
+            // rest of the paths
+            for (file.path, 0..) |path, i| {
+                try out.print("{s}{s}", .{
+                    path,
+                    if (i != file.path.len - 1) "/" else reset ++ "\n",
+                });
+            }
+        }
+    }
+    try out.flush(); // Dont forget to flush!
+}
+
+pub fn printPieceHashes(self: *const Torrent, writer: *std.Io.Writer) !void {
+    try writer.print("{s}{s:<14}{s}\n", .{ title_style, "Piece Hashes:", reset });
+    for (self.info.pieces, 0..) |piece_hash, i| {
+        const hex = std.fmt.fmtSliceHexLower(&piece_hash);
+        try writer.print("{s}\n", .{hex});
+        if (i > 8) {
+            try writer.print("...\n", .{});
+            break;
+        }
+    }
+    try writer.flush(); // Dont forget to flush!
+}
+
+/// Wrapper funct to pretty print the torrent file.
+/// Does not flush the writer.
+fn print_row(writer: *std.Io.Writer, title: []const u8, comptime format: []const u8, contents: anytype) !void {
+    try writer.print("{s}{s:<18}{s}{s}", .{ title_style, title, reset, content_style });
+    try writer.print(format, contents);
+    _ = try writer.write(reset);
+}
+
+test "parse single-file torrent" {
+    const alloc = std.testing.allocator;
+    const data = @embedFile("tests/torrents/sample.txt.torrent");
+
+    const b_val = try bencode.decodeBencode(alloc, data);
+    var torr = try Torrent.init(alloc, b_val);
+    defer torr.deinit(alloc);
+
+    try expectEqualStrings("sample.txt", torr.info.name);
+    try expectEqualStrings("mktorrent 1.1", torr.created_by.?);
+    try expectEqualStrings("http://bittorrent-test-tracker.codecrafters.io/announce", torr.announce);
+    try expect(torr.getType() == .SingleFile);
+}
