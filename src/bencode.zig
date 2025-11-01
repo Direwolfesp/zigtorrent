@@ -200,7 +200,7 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) ParseError!
     }
 }
 
-test "len" {
+test "bencode: calculate length" {
     const alloc = std.testing.allocator;
     {
         const val = "i-34e";

@@ -1,9 +1,10 @@
-const std = @import("std");
-const assert = std.debug.assert;
-const builtin = @import("builtin");
-
-const bencode = @import("bencode.zig");
-const Torrent = @import("Torrent.zig");
+pub const std_options: std.Options = .{
+    .log_level = switch (builtin.mode) {
+        .Debug => .debug,
+        .ReleaseSafe => .info,
+        .ReleaseFast, .ReleaseSmall => .err,
+    },
+};
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -21,22 +22,31 @@ pub fn main() !void {
         if (args.len == 2) {
             break :blk args[1];
         } else {
-            std.log.err("usage: ./program <torrent>", .{});
+            log.err("usage: ./program <torrent>", .{});
             std.process.exit(1);
         }
     };
 
     const start = try std.time.Instant.now();
-    var torrent = try Torrent.open(alloc, filename);
+    var torrent = try TorrentFile.open(alloc, filename);
     const end = try std.time.Instant.now();
     defer torrent.deinit(alloc);
     try torrent.meta.printMetaInfo(alloc, stdout);
-    try stdout.print("Parsed torrent in {D}\n", .{end.since(start)});
+    log.debug("Parsed torrent in {D}\n", .{end.since(start)});
     try stdout.flush();
 }
 
 test {
     _ = bencode;
-    _ = Torrent;
+    _ = TorrentFile;
     _ = @import("Message.zig");
 }
+
+const log = std.log.scoped(.main);
+
+const std = @import("std");
+const assert = std.debug.assert;
+const builtin = @import("builtin");
+
+const bencode = @import("bencode.zig");
+const TorrentFile = @import("TorrentFile.zig");

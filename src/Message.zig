@@ -1,6 +1,8 @@
 //! Represents a message from the Bittorrent peer protocol.
 //! https://wiki.theory.org/BitTorrentSpecification#Messages
 
+const log = std.log.scoped(.Message);
+
 /// Contains the different message IDs of the protocol.
 /// KeepAlive is not considered an ID but is here for convenience.
 /// Order matters.
@@ -68,6 +70,8 @@ pub fn read(reader: *std.Io.Reader, alloc: std.mem.Allocator) !Self {
     };
 }
 
+/// Writes the message to the given sink.
+/// Flush is needed.
 pub fn write(self: Self, writer: *std.Io.Writer) !void {
     switch (self.id) {
         .KeepAlive => {
@@ -95,7 +99,7 @@ pub fn write(self: Self, writer: *std.Io.Writer) !void {
     }
 }
 
-test "read: keep alive" {
+test "message: read keep alive" {
     const alloc = testing.allocator;
     var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0x00, 0x00 });
     const msg = try Self.read(&r, alloc);
@@ -103,7 +107,7 @@ test "read: keep alive" {
     try testing.expect(msg.payload == null);
 }
 
-test "read: choke, unchoke... (messages with no payload but with Id)" {
+test "message: read choke, unchoke... (messages with no payload but with Id)" {
     const alloc = testing.allocator;
     {
         var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0x00, 0x01, 0x00 });
@@ -125,7 +129,7 @@ test "read: choke, unchoke... (messages with no payload but with Id)" {
     }
 }
 
-test "read: have" {
+test "message: read have" {
     const alloc = testing.allocator;
     var r: std.Io.Reader = .fixed(&.{
         0x00, 0x00, 0x00, 0x05,
@@ -140,7 +144,7 @@ test "read: have" {
     try testing.expect(std.mem.readInt(u32, msg.payload.?[0..4], .little) == 4025413131);
 }
 
-test "read: piece" {
+test "message: read piece" {
     const alloc = testing.allocator;
     var r: std.Io.Reader = .fixed(&.{
         0x00, 0x00, 0x00, 0x25, // 37
@@ -164,7 +168,7 @@ test "read: piece" {
     try testing.expect(std.mem.readInt(u32, msg.payload.?[4..8], .little) == 24);
 }
 
-test "roundtrip: request" {
+test "message: roundtrip request" {
     const alloc = std.testing.allocator;
     var buf: [1024]u8 = undefined;
     var r: std.Io.Reader = .fixed(&buf);

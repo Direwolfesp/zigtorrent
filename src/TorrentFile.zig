@@ -1,14 +1,3 @@
-const std = @import("std");
-const Sha1 = std.crypto.hash.Sha1;
-const Allocator = std.mem.Allocator;
-const expectEqualStrings = std.testing.expectEqualStrings;
-const expect = std.testing.expect;
-
-const ansi = @import("ansi.zig");
-const reset = ansi.reset;
-const bencode = @import("bencode.zig");
-const Value = bencode.Value;
-
 const title_style = ansi.bold ++ ansi.blue;
 const content_style = ansi.brightWhite ++ ansi.dim;
 
@@ -28,7 +17,7 @@ const stdout = std.fs.File.stdout();
 var stderr = std.fs.File.stderr().writer(&.{});
 const err = &stderr.interface;
 
-const Torrent = @This();
+const TorrentFile = @This();
 
 /// contents memory
 value: bencode.Value,
@@ -94,7 +83,7 @@ const File = struct {
 /// Not meant to be called directly.
 /// The allocator should hold the backing buffer of the `value`
 /// thus the need to call deinit
-fn init(allocator: Allocator, value: bencode.Value) !Torrent {
+fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
     if (value != .dict) return TorrentError.WrongType;
     const metaDict = &value.dict;
 
@@ -106,7 +95,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
     const creation_date: ?i64 = blk: {
         if (metaDict.get("creation date")) |date| {
             if (date != .integer) {
-                std.log.err("creation date: expected an integer.\n", .{});
+                log.err("creation date: expected an integer.\n", .{});
                 return TorrentError.WrongType;
             }
             break :blk date.integer;
@@ -117,7 +106,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
     const comment: ?[]const u8 = blk: {
         if (metaDict.get("comment")) |comm| {
             if (comm != .string) {
-                std.log.err("comment: expected a string.\n", .{});
+                log.err("comment: expected a string.\n", .{});
                 return TorrentError.WrongType;
             }
             break :blk comm.string;
@@ -128,7 +117,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
     const created_by: ?[]const u8 = blk: {
         if (metaDict.get("created by")) |created| {
             if (created != .string) {
-                std.log.err("created by: expected a string.\n", .{});
+                log.err("created by: expected a string.\n", .{});
                 return TorrentError.WrongType;
             }
             break :blk created.string;
@@ -173,7 +162,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
     const length: ?i64 = blk: {
         if (infoDict.get("length")) |l| {
             if (l != .integer) {
-                std.log.err("length: expected an integer.\n", .{});
+                log.err("length: expected an integer.\n", .{});
                 return TorrentError.WrongType;
             }
             break :blk l.integer;
@@ -184,7 +173,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
     // files (Only present in multiple file)
     const files: ?[]File = blk: {
         const f = infoDict.get("files") orelse break :blk null;
-        if (f != .list) std.log.err("files: expected a list", .{});
+        if (f != .list) log.err("files: expected a list", .{});
 
         const file_list = &f.list;
         var files = try allocator.alloc(File, file_list.items.len);
@@ -211,7 +200,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
         break :blk files;
     };
 
-    return Torrent{
+    return TorrentFile{
         .value = value,
         .announce = announce.string,
         .creation_date = creation_date,
@@ -232,7 +221,7 @@ fn init(allocator: Allocator, value: bencode.Value) !Torrent {
     };
 }
 
-pub fn deinit(self: *Torrent, alloc: Allocator) void {
+pub fn deinit(self: *TorrentFile, alloc: Allocator) void {
     alloc.free(self.info.pieces);
 
     if (self.getType() == .MultiFile) {
@@ -244,7 +233,7 @@ pub fn deinit(self: *Torrent, alloc: Allocator) void {
     self.value.deinit(alloc);
 }
 
-pub fn getType(self: *const Torrent) TorrentType {
+pub fn getType(self: *const TorrentFile) TorrentType {
     return switch (self.info.mode) {
         .files => .MultiFile,
         .length => .SingleFile,
@@ -254,7 +243,7 @@ pub fn getType(self: *const Torrent) TorrentType {
 /// calculate the piece length according to the index,
 /// the last index might get a piece smaller than the other pieces
 /// this is only necesary one per piece
-pub fn calculatePieceSize(self: *const Torrent, index: usize) !i64 {
+pub fn calculatePieceSize(self: *const TorrentFile, index: usize) !i64 {
     const num_whole_pieces = try std.math.divFloor(
         i64,
         self.info.length,
@@ -284,7 +273,7 @@ pub fn open(allocator: Allocator, path: []const u8) !TorrentManaged {
     errdefer b.deinit(allocator);
 
     return .{
-        .meta = try Torrent.init(allocator, b),
+        .meta = try TorrentFile.init(allocator, b),
         .backing_buff = contents,
     };
 }
@@ -292,7 +281,7 @@ pub fn open(allocator: Allocator, path: []const u8) !TorrentManaged {
 /// Meta Info File that owns its underlaying memory.
 /// Must call deinit.
 pub const TorrentManaged = struct {
-    meta: Torrent,
+    meta: TorrentFile,
     backing_buff: []const u8,
 
     pub fn deinit(self: *TorrentManaged, allocator: Allocator) void {
@@ -302,7 +291,7 @@ pub const TorrentManaged = struct {
 };
 
 /// Prints information about the torrent into a writer
-pub fn printMetaInfo(self: *const Torrent, alloc: Allocator, out: *std.Io.Writer) !void {
+pub fn printMetaInfo(self: *const TorrentFile, alloc: Allocator, out: *std.Io.Writer) !void {
     const torr_type = self.getType();
 
     // Basic content
@@ -365,7 +354,7 @@ pub fn printMetaInfo(self: *const Torrent, alloc: Allocator, out: *std.Io.Writer
     try out.flush(); // Dont forget to flush!
 }
 
-pub fn printPieceHashes(self: *const Torrent, writer: *std.Io.Writer) !void {
+pub fn printPieceHashes(self: *const TorrentFile, writer: *std.Io.Writer) !void {
     try writer.print("{s}{s:<14}{s}\n", .{ title_style, "Piece Hashes:", reset });
     for (self.info.pieces, 0..) |piece_hash, i| {
         const hex = std.fmt.fmtSliceHexLower(&piece_hash);
@@ -386,12 +375,12 @@ fn print_row(writer: *std.Io.Writer, title: []const u8, comptime format: []const
     _ = try writer.write(reset);
 }
 
-test "parse single-file torrent" {
+test "TorrentFile: parse single-file torrent" {
     const alloc = std.testing.allocator;
     const data = @embedFile("tests/torrents/sample.txt.torrent");
 
     const b_val = try bencode.decodeBencode(alloc, data);
-    var torr = try Torrent.init(alloc, b_val);
+    var torr = try TorrentFile.init(alloc, b_val);
     defer torr.deinit(alloc);
 
     try expectEqualStrings("sample.txt", torr.info.name);
@@ -399,3 +388,16 @@ test "parse single-file torrent" {
     try expectEqualStrings("http://bittorrent-test-tracker.codecrafters.io/announce", torr.announce);
     try expect(torr.getType() == .SingleFile);
 }
+
+const log = std.log.scoped(.TorrentFile);
+
+const std = @import("std");
+const Sha1 = std.crypto.hash.Sha1;
+const Allocator = std.mem.Allocator;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expect = std.testing.expect;
+
+const ansi = @import("ansi.zig");
+const reset = ansi.reset;
+const bencode = @import("bencode.zig");
+const Value = bencode.Value;
