@@ -240,6 +240,17 @@ pub fn getType(self: *const TorrentFile) TorrentType {
     };
 }
 
+pub fn calculateDownloadSize(self: *const TorrentFile) i64 {
+    return switch (self.getType()) {
+        .MultiFile => blk: {
+            var total: i64 = 0;
+            for (self.info.mode.files) |f| total += f.length;
+            break :blk total;
+        },
+        .SingleFile => self.info.mode.length,
+    };
+}
+
 /// calculate the piece length according to the index,
 /// the last index might get a piece smaller than the other pieces
 /// this is only necesary one per piece

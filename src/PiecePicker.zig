@@ -5,14 +5,14 @@ const PiecePos = struct {
     peer_count: u32,
     /// partial or not (there is entry in `self.downloading`)
     state: bool,
-    // index in `self.pieces`, null means we already have it
+    /// index in `self.pieces`, null means we already have it
     index: ?u32,
 };
 
 const DownloadingPiece = struct {
-    // piece_index
+    /// piece_index
     index: u32,
-    // keep track of each block state
+    /// keep track of each block state
     block_state: std.ArrayList(BlockState),
 
     const BlockState = enum(u8) {

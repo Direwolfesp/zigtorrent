@@ -37,9 +37,9 @@ pub fn main() !void {
 }
 
 test {
-    _ = bencode;
-    _ = TorrentFile;
+    _ = std.testing.refAllDecls(@This());
     _ = @import("Message.zig");
+    _ = @import("Tracker.zig");
 }
 
 const log = std.log.scoped(.main);
