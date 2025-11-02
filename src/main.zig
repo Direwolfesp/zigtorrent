@@ -11,10 +11,6 @@ pub fn main() !void {
     const alloc = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    var buf: [2048]u8 = undefined;
-    var out = std.fs.File.stdout().writer(&buf);
-    const stdout = &out.interface;
-
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
@@ -31,15 +27,14 @@ pub fn main() !void {
     var torrent = try TorrentFile.open(alloc, filename);
     const end = try std.time.Instant.now();
     defer torrent.deinit(alloc);
-    try torrent.meta.printMetaInfo(alloc, stdout);
-    log.debug("Parsed torrent in {D}\n", .{end.since(start)});
-    try stdout.flush();
+    log.debug("Parsed torrent in {D}", .{end.since(start)});
+
+    const tracker = try Tracker.init(&torrent.meta);
+    try tracker.announce(alloc);
 }
 
 test {
     _ = std.testing.refAllDecls(@This());
-    _ = @import("Message.zig");
-    _ = @import("Tracker.zig");
 }
 
 const log = std.log.scoped(.main);
@@ -49,4 +44,6 @@ const assert = std.debug.assert;
 const builtin = @import("builtin");
 
 const bencode = @import("bencode.zig");
+const Message = @import("Message.zig");
 const TorrentFile = @import("TorrentFile.zig");
+const Tracker = @import("Tracker.zig");

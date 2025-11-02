@@ -48,7 +48,7 @@ uploaded: u64 = 0,
 /// Bytes downloaded since the started event.
 downloaded: u64 = 0,
 /// Bytes this client still has to download.
-left: i64,
+left: u64,
 /// Indicates that the client accepts binary format response
 compact: bool = true,
 /// Store last response for quick access
@@ -61,16 +61,117 @@ pub fn init(torr: *const TorrentFile) !Tracker {
         .announce_url = torr.announce,
         .info_hash = torr.info_hash,
         .peer_id = try genPeerId(),
-        .left = try torr.calculateDownloadSize(),
+        .left = @intCast(torr.calculateDownloadSize()),
     };
 }
 
-pub fn announce() !void {
-    @panic("Unimplemented function stub\n");
+fn formatEvent(self: *const Tracker) []const u8 {
+    if (self.state == null) return "";
+
+    return switch (self.state.?) {
+        .completed => "&event=" ++ @tagName(Status.completed),
+        .started => "&event=" ++ @tagName(Status.started),
+        .stopped => "&event=" ++ @tagName(Status.stopped),
+        .in_progress => "",
+    };
+}
+
+pub fn announce(self: *const Tracker, alloc: std.mem.Allocator) !void {
+    const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
+    const info_hash = try std.fmt.allocPrint(alloc, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
+    defer alloc.free(info_hash);
+
+    const peer_id_comp = std.Uri.Component{ .raw = &self.peer_id };
+    const peer_id = try std.fmt.allocPrint(alloc, "{f}", .{std.fmt.alt(peer_id_comp, .formatEscaped)});
+    defer alloc.free(peer_id);
+
+    const trackerid: []const u8 = if (self.tracker_id) |tracker_id|
+        try std.fmt.allocPrint(alloc, "&trackerid={s}", .{tracker_id})
+    else
+        "";
+    defer if (trackerid.len != 0) alloc.free(trackerid);
+
+    const url = try std.fmt.allocPrint(alloc, "{s}?" ++
+        "info_hash={s}" ++ "&peer_id={s}" ++
+        "&port={d}" ++ "&uploaded={d}" ++
+        "&downloaded={d}" ++ "&left={d}" ++
+        "&compact={d}" ++
+        "{s}" ++ // trackerid
+        "{s}", // event
+        .{
+            self.announce_url,
+            info_hash,
+            peer_id,
+            self.port,
+            self.uploaded,
+            self.downloaded,
+            self.left,
+            @intFromBool(self.compact),
+            trackerid,
+            self.formatEvent(),
+        });
+    defer alloc.free(url);
+
+    const uri = try std.Uri.parse(url);
+
+    var client = std.http.Client{ .allocator = alloc };
+    defer client.deinit();
+
+    const server_header_buff: []u8 = try alloc.alloc(u8, 1024);
+    defer alloc.free(server_header_buff);
+
+    var res_alloc: std.Io.Writer.Allocating = try .initCapacity(alloc, 1000);
+    defer res_alloc.deinit();
+    const res_writer: *std.Io.Writer = &res_alloc.writer;
+
+    const res = client.fetch(.{
+        .method = .GET,
+        .location = .{ .uri = uri },
+        .response_writer = res_writer,
+    }) catch |err| {
+        log.err("Could not stablish a connection with the tracker. Error: {t}", .{err});
+        return Error.NetworkFailure;
+    };
+
+    if (res.status != .ok) {
+        log.err("Tracker response error: {t}", .{res.status});
+        return Error.NetworkFailure;
+    }
+
+    std.debug.assert(res_writer.buffered().len != 0);
+    var body = try bencode.decodeBencode(alloc, res_writer.buffered());
+    defer body.deinit(alloc);
+    std.debug.assert(body == .dict);
+
+    const body_dict = &body.dict;
+    if (body_dict.get("failure reason")) |reason| {
+        std.debug.assert(reason == .string);
+        log.err("Failure reason: {s}", .{reason.string});
+        return Error.ResponseFailure;
+    }
+
+    if (body_dict.get("warning message")) |warning| {
+        std.debug.assert(warning == .string);
+        log.warn("Warning: {s}", .{warning.string});
+    }
+
+    log.info("tracker response success", .{});
+    // TODO: keep parsing the response and store it in self
+}
+
+pub fn onDownload(self: *const Tracker, bytes: i64) void {
+    self.downloaded += bytes;
+    self.left -|= bytes;
+
+    if (self.left == 0 and self.state.? == .in_progress) {
+        self.state = .completed;
+        log.info("Downloaded completed. State = completed", .{});
+    }
 }
 
 const Error = error{
     NetworkFailure,
+    ResponseFailure,
 };
 
 const ParseError = error{
@@ -92,7 +193,6 @@ fn parsePeersDict(
 
     for (data.items) |d| {
         if (d != .dict) return ParseError.InvalidIpFormat;
-
         const dict = &d.dict;
         const ip = dict.get("ip") orelse return ParseError.MissingIp;
         const port = dict.get("port") orelse return ParseError.MissingPort;
