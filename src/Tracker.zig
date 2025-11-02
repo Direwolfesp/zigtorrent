@@ -76,7 +76,11 @@ fn formatEvent(self: *const Tracker) []const u8 {
     };
 }
 
-pub fn announce(self: *const Tracker, alloc: std.mem.Allocator) !void {
+pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
+    var arena: std.heap.ArenaAllocator = .init(allocator); // this is a good idea?
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
     const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
     const info_hash = try std.fmt.allocPrint(alloc, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
     defer alloc.free(info_hash);
@@ -124,6 +128,7 @@ pub fn announce(self: *const Tracker, alloc: std.mem.Allocator) !void {
     defer res_alloc.deinit();
     const res_writer: *std.Io.Writer = &res_alloc.writer;
 
+    log.debug("Requesting to {s}", .{self.announce_url});
     const res = client.fetch(.{
         .method = .GET,
         .location = .{ .uri = uri },
@@ -168,9 +173,6 @@ pub fn announce(self: *const Tracker, alloc: std.mem.Allocator) !void {
     defer alloc.free(parsed_peers);
 
     log.debug("Peer count: {d}", .{parsed_peers.len});
-    for (parsed_peers) |p| {
-        log.debug("{f}", .{p});
-    }
 
     // TODO: keep parsing the response and store it in self
     log.info("tracker response success", .{});
@@ -256,7 +258,7 @@ fn genPeerId() std.fmt.BufPrintError![20]u8 {
 
     _ = try std.fmt.bufPrint(id[0..8], "-PE{d:0>4}-", .{short_pid});
     inline for (8..20) |i|
-        id[i] = random.intRangeAtMost(u8, 32, 126);
+        id[i] = random.intRangeAtMost(u8, 48, 57);
 
     return id;
 }
@@ -269,9 +271,8 @@ test "tracker: generate peer id" {
         switch (i) {
             0 => try testing.expect(id[i] == '-'),
             1...2 => try testing.expect(ascii.isAlphabetic(id[i])),
-            3...6 => try testing.expect(ascii.isDigit(id[i])),
+            3...6, 8...19 => try testing.expect(ascii.isDigit(id[i])),
             7 => try testing.expect(id[i] == '-'),
-            8...19 => try testing.expect(ascii.isPrint(id[i])),
             else => unreachable,
         }
     }

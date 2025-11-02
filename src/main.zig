@@ -2,7 +2,7 @@ pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
         .ReleaseSafe => .info,
-        .ReleaseFast, .ReleaseSmall => .err,
+        .ReleaseFast, .ReleaseSmall => .warn,
     },
 };
 
@@ -23,18 +23,26 @@ pub fn main() !void {
         }
     };
 
-    const start = try std.time.Instant.now();
+    var timer = try std.time.Timer.start();
     var torrent = try TorrentFile.open(alloc, filename);
-    const end = try std.time.Instant.now();
-    defer torrent.deinit(alloc);
-    log.debug("Parsed torrent in {D}", .{end.since(start)});
+    const parse_torrent_time = timer.lap();
 
     const tracker = try Tracker.init(&torrent.meta);
+    timer.reset();
     try tracker.announce(alloc);
+    const get_peers_timer = timer.lap();
+
+    log.debug(
+        \\
+        \\ Parsed torrent in {D}
+        \\ Got peers from tracker in {D}
+    , .{ parse_torrent_time, get_peers_timer });
+    defer torrent.deinit(alloc);
 }
 
 test {
     _ = std.testing.refAllDecls(@This());
+    _ = Message;
 }
 
 const log = std.log.scoped(.main);
