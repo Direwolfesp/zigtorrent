@@ -155,8 +155,25 @@ pub fn announce(self: *const Tracker, alloc: std.mem.Allocator) !void {
         log.warn("Warning: {s}", .{warning.string});
     }
 
-    log.info("tracker response success", .{});
+    const peers = body_dict.get("peers") orelse {
+        log.warn("Tracker did not respond with any peers.", .{});
+        return Error.MissingPeers;
+    };
+
+    const parsed_peers: []std.net.Ip4Address = switch (peers) {
+        .string => |str| try parsePeersBinary(alloc, str),
+        .list => |list| try parsePeersDict(alloc, &list),
+        else => unreachable,
+    };
+    defer alloc.free(parsed_peers);
+
+    log.debug("Peer count: {d}", .{parsed_peers.len});
+    for (parsed_peers) |p| {
+        log.debug("{f}", .{p});
+    }
+
     // TODO: keep parsing the response and store it in self
+    log.info("tracker response success", .{});
 }
 
 pub fn onDownload(self: *const Tracker, bytes: i64) void {
@@ -172,6 +189,7 @@ pub fn onDownload(self: *const Tracker, bytes: i64) void {
 const Error = error{
     NetworkFailure,
     ResponseFailure,
+    MissingPeers,
 };
 
 const ParseError = error{
