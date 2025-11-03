@@ -45,13 +45,13 @@ failure_reason: ?[]const u8 = null,
 /// The response still gets processed normally. The warning message is shown just like an error.
 warning_message: ?[]const u8 = null,
 /// Seconds to wait between requests
-interval_s: u64,
+interval_s: u64 = 0,
 /// If present clients must not reannounce more frequently than this
 min_interval: ?u64 = null,
 /// seeders
-complete: u32,
+complete: u32 = 0,
 /// leechers
-incomplete: u32,
+incomplete: u32 = 0,
 /// Peers. Null on start-up
 /// TODO: integrate with the rest of the client. Most importantly
 /// with the piecePicker and the server
@@ -98,7 +98,7 @@ fn formatEvent(self: *const Tracker) []const u8 {
     };
 }
 
-pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
+pub fn announce(self: *Tracker, allocator: std.mem.Allocator) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -174,7 +174,7 @@ pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
 
     // NOTE: here we dont pass the arena as we want persistent
     // allocations that outlive this function.
-    try parseResponse(allocator, body.dict);
+    try self.parseResponse(allocator, body.dict);
     log.info("tracker response success", .{});
 }
 
@@ -204,8 +204,8 @@ fn parseResponse(
             // free the old one
             alloc.free(prev_warn);
         }
-        self.warning_message = try alloc.dupe(u8, warning);
         std.debug.assert(warning == .string);
+        self.warning_message = try alloc.dupe(u8, warning.string);
         log.warn("Warning: {s}", .{warning.string});
     }
 
@@ -213,9 +213,24 @@ fn parseResponse(
     if (self.tracker_id == null) {
         if (response.get("tracker id")) |id| {
             std.debug.assert(id == .string);
-            self.tracker_id = try alloc.dupe(id.string);
+            self.tracker_id = try alloc.dupe(u8, id.string);
             log.debug("Found tracker id: {s}", .{id.string});
         }
+    }
+
+    if (response.get("interval")) |interval| {
+        std.debug.assert(interval == .integer);
+        self.interval_s = @intCast(interval.integer);
+    }
+
+    if (response.get("complete")) |seeders| {
+        std.debug.assert(seeders == .integer);
+        self.complete = @intCast(seeders.integer);
+    }
+
+    if (response.get("incomplete")) |leechers| {
+        std.debug.assert(leechers == .integer);
+        self.complete = @intCast(leechers.integer);
     }
 
     const peers = response.get("peers") orelse {
@@ -229,10 +244,9 @@ fn parseResponse(
         else => unreachable,
     };
 
-    // TODO: i doubt this is the correct way (killing all old peers and
-    // adding the new one) becaouse of the rest of the system state could depend
-    // on these peers of existing. Maybe i could mitigate this issue from the
-    // other part of the code.
+    // TODO: I doubt this is the correct way (killing all old peers and
+    // adding the new one) bacause the rest of the system state could depend
+    // on these peers existing. For now its not a big deal.
     if (self.peers) |old_peers| {
         alloc.free(old_peers);
     }

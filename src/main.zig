@@ -27,7 +27,8 @@ pub fn main() !void {
     var torrent = try TorrentFile.open(alloc, filename);
     const parse_torrent_time = timer.lap();
 
-    const tracker = try Tracker.init(&torrent.meta);
+    var tracker = try Tracker.init(&torrent.meta);
+    defer tracker.deinit(alloc);
     timer.reset();
     try tracker.announce(alloc);
     const get_peers_timer = timer.lap();
