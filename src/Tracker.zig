@@ -24,7 +24,7 @@ info_hash: [20]u8 = undefined,
 /// Generated once at start-up
 peer_id: [20]u8 = undefined, // -[2chars][4digits]-[20chars]
 /// state is null before contacting to tracker
-state: ?Status = null,
+state: Status = .started,
 /// where this client is listening on, typically 6881-6889
 port: u16 = 6881,
 /// Bytes uploaded since the started event.
@@ -88,9 +88,7 @@ pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
 }
 
 fn formatEvent(self: *const Tracker) []const u8 {
-    if (self.state == null) return "";
-
-    return switch (self.state.?) {
+    return switch (self.state) {
         .completed => "&event=" ++ @tagName(Status.completed),
         .started => "&event=" ++ @tagName(Status.started),
         .stopped => "&event=" ++ @tagName(Status.stopped),
@@ -259,7 +257,7 @@ pub fn onDownload(self: *const Tracker, bytes: i64) void {
     self.downloaded += bytes;
     self.left -|= bytes;
 
-    if (self.left == 0 and self.state.? == .in_progress) {
+    if (self.left == 0 and self.state == .in_progress) {
         self.state = .completed;
         log.info("Downloaded completed. State = completed", .{});
     }
@@ -346,7 +344,7 @@ pub fn printState(self: Tracker, out: *std.Io.Writer) error{WriteFailed}!void {
         \\Announce url: {s}
         \\Tracker Id: {s}
         \\Peer Id: {s}
-        \\State: {any}
+        \\State: {t}
         \\Port: {d}
         \\Leechers: {d}
         \\Seeders: {d}
