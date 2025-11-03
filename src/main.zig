@@ -47,6 +47,7 @@ pub fn main() !void {
 test {
     _ = std.testing.refAllDecls(@This());
     _ = Message;
+    _ = @import("DiskIO.zig");
 }
 
 const log = std.log.scoped(.main);

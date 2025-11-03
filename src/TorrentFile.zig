@@ -386,7 +386,7 @@ fn print_row(writer: *std.Io.Writer, title: []const u8, comptime format: []const
     _ = try writer.write(reset);
 }
 
-test "TorrentFile: parse single-file torrent" {
+test "torrent_file: parse single-file torrent" {
     const alloc = std.testing.allocator;
     const data = @embedFile("tests/torrents/sample.txt.torrent");
 
