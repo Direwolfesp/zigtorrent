@@ -1,22 +1,6 @@
-//!
-//!
-
-pub const Response = struct {
-    /// If present, then no other keys may be present
-    failure_reason: ?[]const u8 = null,
-    /// The response still gets processed normally. The warning message is shown just like an error.
-    warning_message: ?[]const u8 = null,
-    /// Seconds to wait between requests
-    interval_s: u64,
-    /// If present clients must not reannounce more frequently than this
-    min_interval: ?u64 = null,
-    /// seeders
-    complete: u32,
-    /// leechers
-    incomplete: u32,
-    /// Peers
-    peers: bencode.Value,
-};
+//! This struct is incharge of contacting with the tracker
+//! to get updates of the peers swarm and also for sending
+//! our current state to the tracker.
 
 const Status = enum(u8) {
     /// The first request to the tracker must include the event key with this value
@@ -51,11 +35,29 @@ downloaded: u64 = 0,
 left: u64,
 /// Indicates that the client accepts binary format response
 compact: bool = true,
-/// Store last response for quick access
-last_response: ?Response = null,
+
+// --- Fields below are mostly updated across responces ---
+
 /// If present, must be reused for consecutive connections
 tracker_id: ?[]const u8 = null,
+/// If present, then no other keys may be present
+failure_reason: ?[]const u8 = null,
+/// The response still gets processed normally. The warning message is shown just like an error.
+warning_message: ?[]const u8 = null,
+/// Seconds to wait between requests
+interval_s: u64,
+/// If present clients must not reannounce more frequently than this
+min_interval: ?u64 = null,
+/// seeders
+complete: u32,
+/// leechers
+incomplete: u32,
+/// Peers. Null on start-up
+/// TODO: integrate with the rest of the client. Most importantly
+/// with the piecePicker and the server
+peers: ?[]std.net.Ip4Address = null,
 
+/// Must call deinit
 pub fn init(torr: *const TorrentFile) !Tracker {
     return .{
         .announce_url = torr.announce,
@@ -63,6 +65,26 @@ pub fn init(torr: *const TorrentFile) !Tracker {
         .peer_id = try genPeerId(),
         .left = @intCast(torr.calculateDownloadSize()),
     };
+}
+
+/// The same allocator used for `announce`
+// TODO: free the rest when we fisish the rest of the functions
+pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
+    if (self.tracker_id) |id| {
+        alloc.free(id);
+    }
+
+    if (self.warning_message) |warning| {
+        alloc.free(warning);
+    }
+
+    if (self.failure_reason) |failure| {
+        alloc.free(failure);
+    }
+
+    if (self.peers) |peers| {
+        alloc.free(peers);
+    }
 }
 
 fn formatEvent(self: *const Tracker) []const u8 {
@@ -77,10 +99,11 @@ fn formatEvent(self: *const Tracker) []const u8 {
 }
 
 pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
-    var arena: std.heap.ArenaAllocator = .init(allocator); // this is a good idea?
+    var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    // this in needed for urlencoding
     const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
     const info_hash = try std.fmt.allocPrint(alloc, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
     defer alloc.free(info_hash);
@@ -89,8 +112,9 @@ pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
     const peer_id = try std.fmt.allocPrint(alloc, "{f}", .{std.fmt.alt(peer_id_comp, .formatEscaped)});
     defer alloc.free(peer_id);
 
-    const trackerid: []const u8 = if (self.tracker_id) |tracker_id|
-        try std.fmt.allocPrint(alloc, "&trackerid={s}", .{tracker_id})
+    // only print it if available
+    const trackerid: []const u8 = if (self.tracker_id) |id|
+        try std.fmt.allocPrint(alloc, "&trackerid={s}", .{id})
     else
         "";
     defer if (trackerid.len != 0) alloc.free(trackerid);
@@ -148,19 +172,53 @@ pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
     defer body.deinit(alloc);
     std.debug.assert(body == .dict);
 
-    const body_dict = &body.dict;
-    if (body_dict.get("failure reason")) |reason| {
+    // NOTE: here we dont pass the arena as we want persistent
+    // allocations that outlive this function.
+    try parseResponse(allocator, body.dict);
+    log.info("tracker response success", .{});
+}
+
+/// Parses the given dictionary and allocates the necessary
+/// elements for internal storing.
+fn parseResponse(
+    self: *Tracker,
+    alloc: std.mem.Allocator,
+    response: std.StringArrayHashMap(bencode.Value),
+) !void {
+    // storing the failure reason might me innecesary as most
+    // of the times we will give up on connecting again.
+    if (response.get("failure reason")) |reason| {
+        if (self.failure_reason) |old_failure| {
+            // free the old one
+            alloc.free(old_failure);
+        }
         std.debug.assert(reason == .string);
+        self.failure_reason = try alloc.dupe(u8, reason.string);
         log.err("Failure reason: {s}", .{reason.string});
         return Error.ResponseFailure;
     }
 
-    if (body_dict.get("warning message")) |warning| {
+    // if a warning message is present, we might wanna store it
+    if (response.get("warning message")) |warning| {
+        if (self.warning_message) |prev_warn| {
+            // free the old one
+            alloc.free(prev_warn);
+        }
+        self.warning_message = try alloc.dupe(u8, warning);
         std.debug.assert(warning == .string);
         log.warn("Warning: {s}", .{warning.string});
     }
 
-    const peers = body_dict.get("peers") orelse {
+    // we only want to parse this field once and keep reusing it
+    if (self.tracker_id == null) {
+        if (response.get("tracker id")) |id| {
+            std.debug.assert(id == .string);
+            self.tracker_id = try alloc.dupe(id.string);
+            log.debug("Found tracker id: {s}", .{id.string});
+        }
+    }
+
+    const peers = response.get("peers") orelse {
         log.warn("Tracker did not respond with any peers.", .{});
         return Error.MissingPeers;
     };
@@ -170,12 +228,17 @@ pub fn announce(self: *const Tracker, allocator: std.mem.Allocator) !void {
         .list => |list| try parsePeersDict(alloc, &list),
         else => unreachable,
     };
-    defer alloc.free(parsed_peers);
+
+    // TODO: i doubt this is the correct way (killing all old peers and
+    // adding the new one) becaouse of the rest of the system state could depend
+    // on these peers of existing. Maybe i could mitigate this issue from the
+    // other part of the code.
+    if (self.peers) |old_peers| {
+        alloc.free(old_peers);
+    }
+    self.peers = parsed_peers;
 
     log.debug("Peer count: {d}", .{parsed_peers.len});
-
-    // TODO: keep parsing the response and store it in self
-    log.info("tracker response success", .{});
 }
 
 pub fn onDownload(self: *const Tracker, bytes: i64) void {
