@@ -355,6 +355,25 @@ test "tracker: generate peer id" {
     }
 }
 
+test "tracker: parsePeersBinary" {
+    const alloc = std.testing.allocator;
+    const ips = try Tracker.parsePeersBinary(
+        alloc,
+        &.{
+            0xc0, 0xa8, 0x01, 0x0A, 0xb8, 0x22,
+            0xc0, 0xa8, 0x01, 0x0A, 0xb8, 0x22,
+            0xc0, 0xa8, 0x01, 0x0A, 0xb8, 0x22,
+            0xc0, 0xa8, 0x01, 0x0A, 0xb8, 0x22,
+            0xc0, 0xa8, 0x01, 0x0A, 0xb8, 0x22,
+        },
+    );
+    defer alloc.free(ips);
+
+    try testing.expectEqual(ips.len, 5);
+    try testing.expectEqual(ips[0].sa.port, 8888);
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&ips[0].sa.addr), &.{ 192, 168, 1, 10 });
+}
+
 const log = std.log.scoped(.tracker);
 
 const std = @import("std");
