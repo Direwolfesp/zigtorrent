@@ -33,11 +33,14 @@ pub fn main() !void {
     try tracker.announce(alloc);
     const get_peers_timer = timer.lap();
 
-    log.debug(
-        \\
-        \\ Parsed torrent in {D}
-        \\ Got peers from tracker in {D}
-    , .{ parse_torrent_time, get_peers_timer });
+    log.debug("Parsed torrent in {D}", .{parse_torrent_time});
+    log.debug("Got peers from tracker in {D}", .{get_peers_timer});
+
+    var stdout_w = std.fs.File.stdout().writer(&.{});
+    const stdout = &stdout_w.interface;
+    try tracker.printState(stdout);
+    try stdout.flush();
+
     defer torrent.deinit(alloc);
 }
 

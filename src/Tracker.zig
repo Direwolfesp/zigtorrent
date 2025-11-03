@@ -230,7 +230,7 @@ fn parseResponse(
 
     if (response.get("incomplete")) |leechers| {
         std.debug.assert(leechers == .integer);
-        self.complete = @intCast(leechers.integer);
+        self.incomplete = @intCast(leechers.integer);
     }
 
     const peers = response.get("peers") orelse {
@@ -340,16 +340,47 @@ fn genPeerId() std.fmt.BufPrintError![20]u8 {
     return id;
 }
 
+pub fn printState(self: Tracker, out: *std.Io.Writer) error{WriteFailed}!void {
+    try out.print(
+        \\------ STATS ------
+        \\Announce url: {s}
+        \\Tracker Id: {s}
+        \\Peer Id: {s}
+        \\State: {any}
+        \\Port: {d}
+        \\Leechers: {d}
+        \\Seeders: {d}
+        \\Uploaded: {B: <5.3}
+        \\Downloaded: {B: <5.3}
+        \\Left: {B: <5.3}
+        \\Interval: {D}
+        \\Warnings: {s}
+    , .{
+        self.announce_url,
+        self.tracker_id orelse "N/A",
+        self.peer_id,
+        self.state,
+        self.port,
+        self.incomplete,
+        self.complete,
+        self.uploaded,
+        self.downloaded,
+        self.left,
+        self.interval_s * std.time.ns_per_s,
+        self.warning_message orelse "N/A",
+    });
+}
+
 test "tracker: generate peer id" {
     // -[2chars][4digits]-[20chars]
     const id = try genPeerId();
 
     inline for (0..20) |i| {
         switch (i) {
-            0 => try testing.expect(id[i] == '-'),
+            0 => try testing.expectEqual(id[i], '-'),
             1...2 => try testing.expect(ascii.isAlphabetic(id[i])),
             3...6, 8...19 => try testing.expect(ascii.isDigit(id[i])),
-            7 => try testing.expect(id[i] == '-'),
+            7 => try testing.expectEqual(id[i], '-'),
             else => unreachable,
         }
     }
