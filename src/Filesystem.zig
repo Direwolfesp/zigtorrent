@@ -133,58 +133,42 @@ pub fn processTask() void {
 /// Attempts to write piece content to the corresponding file(s).
 /// In case of failure, caller might want to update the `task` status
 /// to something appropiate.
-fn writePiece(self: Self, task: IOMessage) Error!void {
-    // The last piece usually has a smaller length
-    std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
+fn writePiece(self: Self, task: IOMessage) !void {
+    std.debug.assert(try self.torr.calculatePieceSize(task.index) == task.payload.len);
 
-    var left = task.payload.len;
+    // global byte offsets of the piece within the logical file
     const write_start: i64 = task.index * self.torr.info.piece_length;
     const write_end: i64 = write_start + task.payload.len;
-    var file_start_offset: i64 = 0; // starting byte of the current file
 
-    var i = 0;
-    while (i < self.files.items.len and left != 0) : (i += 1) {
-        const file = &self.files.items[i];
-        // always store prev file offset
+    // number of bytes to be written
+    var left = task.payload.len;
+
+    var file_start_offset: i64 = 0; // starting byte of the current file
+    var file_buf: [8192]u8 = undefined;
+
+    for (self.files.items) |*file| {
+        var writer = file.fd.writer(&file_buf);
+        const file_writer = &writer.interface;
+
         defer file_start_offset = file.end_offset;
 
-        const withing_file =
-            write_start >= file_start_offset and write_end <= file.end_offset;
+        const region_start: i64 = @max(write_start, file_start_offset);
+        const region_end: i64 = @min(write_end, file.end_offset);
 
-        const starts_in_file =
-            write_start >= file_start_offset and write_end > file.end_offset and
-            write_start < file.end_offset;
-
-        const ends_in_file =
-            write_end <= file_start_offset and file_start_offset > write_start and
-            write_end > file_start_offset;
-
-        // skip if this piece does not correspond current file
-        if (!(withing_file or starts_in_file or ends_in_file))
+        // piece is another file
+        if (region_end <= region_start)
             continue;
 
-        file.fd.seekTo(if (withing_file)
-            write_start - file_start_offset
-        else if (starts_in_file)
-            0 // TODO
-        else if (ends_in_file)
-            0) catch return Error.WriteFailed;
+        const file_offset = region_start - file_start_offset;
+        const payload_start = region_start - write_start;
+        const payload_end = region_end - write_start;
 
-        const can_write = if (withing_file)
-            task.payload.len
-        else if (starts_in_file)
-            0 // TODO
-        else if (ends_in_file)
-            0; // TODO
+        try writer.seekTo(file_offset);
+        try file_writer.writeAll(task.payload[payload_start..payload_end]);
+        try file_writer.flush();
 
-        std.debug.assert(0 < can_write and can_write <= task.payload.len);
-
-        var j = 0; // TODO
-        while (j != can_write) {
-            const n = file.fd.write(task.payload[j..can_write]) catch return Error.WriteFailed;
-            j += n;
-            left -= n;
-        }
+        left -= payload_end - payload_start;
+        if (left == 0) break;
     }
 
     std.debug.assert(left == 0);
