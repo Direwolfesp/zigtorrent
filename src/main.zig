@@ -39,6 +39,13 @@ pub fn main() !void {
     try tracker.announce(alloc);
     const get_peers_timer = timer.lap();
 
+    var fs_manager = try Filesystem.init(alloc, &torrent.meta, 1024);
+    defer fs_manager.deinit();
+
+    fs_manager.ensureFsStructure() catch |err| {
+        log.err("Could not create torrent structure in de filesystem: {t}", .{err});
+    };
+
     log.debug("Parsed torrent in {D}", .{parse_torrent_time});
     log.debug("Got peers from tracker in {D}", .{get_peers_timer});
 
@@ -49,7 +56,7 @@ pub fn main() !void {
 test {
     _ = std.testing.refAllDecls(@This());
     _ = Message;
-    _ = @import("Filesystem.zig");
+    _ = Filesystem;
 }
 
 const log = std.log.scoped(.main);
@@ -63,3 +70,4 @@ const bencode = @import("bencode.zig");
 const Message = @import("Message.zig");
 const TorrentFile = @import("TorrentFile.zig");
 const Tracker = @import("Tracker.zig");
+const Filesystem = @import("Filesystem.zig");

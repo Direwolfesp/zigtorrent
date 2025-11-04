@@ -138,7 +138,7 @@ fn checkIntegrity(self: *Self, task: IOMessage) bool {
 /// TODO: it should make sure the file/files
 /// are created in the filesystem. If they already
 /// existed, that might considered an error
-pub fn ensureFsStructure(self: Self) !void {
+pub fn ensureFsStructure(self: *Self) !void {
     switch (self.torr.getType()) {
         .SingleFile => try self.ensureSingleFile(),
         .MultiFile => try self.ensureMultiFile(),
@@ -150,11 +150,11 @@ fn ensureSingleFile(self: *Self) !void {
     const filename = self.torr.info.name;
     const file = std.fs.cwd().createFile(filename, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => {
-            log.err("File '{s}' already exists. Delete it first before downloading it again", .{filename});
+            log.warn("File '{s}' already exists. Delete it first before downloading it again", .{filename});
             return err;
         },
         else => {
-            log.err("Could not create file: '{t}'", .{err});
+            log.warn("Could not create file: '{t}'", .{err});
             return err;
         },
     };
@@ -180,17 +180,16 @@ fn ensureMultiFile(self: *Self) !void {
 
         const fullpath = try std.fs.path.join(self.alloc, path_components);
         defer self.alloc.free(fullpath);
-
         // the torrent name always acts as a dirname, so its safe to unwrap
         try std.fs.cwd().makePath(std.fs.path.dirname(fullpath).?);
 
         const fd = std.fs.cwd().createFile(fullpath, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => {
-                log.err("File '{s}' already exists. Delete it first before downloading it again", .{fullpath});
+                log.warn("File '{s}' already exists. Delete it first before downloading it again", .{fullpath});
                 return err;
             },
             else => {
-                log.err("Could not create file: '{t}'", .{err});
+                log.warn("Could not create file: '{t}'", .{err});
                 return err;
             },
         };
