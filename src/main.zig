@@ -4,6 +4,7 @@ pub const std_options: std.Options = .{
         .ReleaseSafe => .info,
         .ReleaseFast, .ReleaseSmall => .warn,
     },
+    .logFn = logger.logFn,
 };
 
 pub fn main() !void {
@@ -41,7 +42,6 @@ pub fn main() !void {
     log.debug("Parsed torrent in {D}", .{parse_torrent_time});
     log.debug("Got peers from tracker in {D}", .{get_peers_timer});
 
-    try torrent.meta.printMetaInfo(alloc, stdout);
     try tracker.printState(stdout);
     try stdout.flush();
 }
@@ -58,6 +58,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 
+const logger = @import("tests/logger.zig");
 const bencode = @import("bencode.zig");
 const Message = @import("Message.zig");
 const TorrentFile = @import("TorrentFile.zig");

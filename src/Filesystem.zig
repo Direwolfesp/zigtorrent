@@ -236,7 +236,7 @@ test "fs_manager: ensure single file" {
     try testing.expectEqual(fs_manager.files.items.len, 1);
 }
 
-const log = std.log.scoped(.disk_io);
+const log = std.log.scoped(.filesystem);
 
 const std = @import("std");
 const testing = std.testing;
