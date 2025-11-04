@@ -5,23 +5,23 @@
 //!
 //! Downloaded torrent might look like this:
 //!
-//! + --------------------------- +
+//! + --------------------------- + 0kB
 //! |                             |
-//! |        /path/file1          |
+//! |        /path/file1          | (real: 21kB)
 //! |                             |
-//! + --------------------------- +
+//! + --------------------------- + 21kB
 //! |                             |
-//! |        /path/file2          |
+//! |        /path/file2          | (real: 32kB)
 //! |                             |
-//! + --------------------------- +
+//! + --------------------------- + 53kB
 //! |                             |
-//! |        /path/file3          |
+//! |        /path/file3          | (real: 5kB)
 //! |                             |
-//! + --------------------------- +
+//! + --------------------------- + 58kB
 //! |                             |
-//! |        /path/file4          |
+//! |        /path/file4          | (real: 5kB)
 //! |                             |
-//! + --------------------------- +
+//! + --------------------------- + 62kB
 //!
 //! But the problem is that a file might:
 //! - be made of one piece (for small files)
@@ -64,6 +64,15 @@ const IOMessage = struct {
     payload: []const u8,
 };
 
+const FileInfo = struct {
+    fd: std.fs.File,
+    end_offset: i64,
+};
+
+const Error = error{
+    WriteFailed,
+};
+
 alloc: std.mem.Allocator,
 /// The current torrent
 torr: *const TorrentFile,
@@ -76,11 +85,6 @@ submission_queue: MessageQueue,
 completion_queue: MessageQueue,
 /// for checking integrity
 hasher: std.crypto.hash.Sha1,
-
-const FileInfo = struct {
-    fd: std.fs.File,
-    size: i64,
-};
 
 pub fn init(alloc: std.mem.Allocator, torr: *const TorrentFile, queue_bufsize: usize) !Self {
     return .{
@@ -126,6 +130,66 @@ pub fn processTask() void {
     // queue
 }
 
+/// Attempts to write piece content to the corresponding file(s).
+/// In case of failure, caller might want to update the `task` status
+/// to something appropiate.
+fn writePiece(self: Self, task: IOMessage) Error!void {
+    // The last piece usually has a smaller length
+    std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
+
+    var left = task.payload.len;
+    const write_start: i64 = task.index * self.torr.info.piece_length;
+    const write_end: i64 = write_start + task.payload.len;
+    var file_start_offset: i64 = 0; // starting byte of the current file
+
+    var i = 0;
+    while (i < self.files.items.len and left != 0) : (i += 1) {
+        const file = &self.files.items[i];
+        // always store prev file offset
+        defer file_start_offset = file.end_offset;
+
+        const withing_file =
+            write_start >= file_start_offset and write_end <= file.end_offset;
+
+        const starts_in_file =
+            write_start >= file_start_offset and write_end > file.end_offset and
+            write_start < file.end_offset;
+
+        const ends_in_file =
+            write_end <= file_start_offset and file_start_offset > write_start and
+            write_end > file_start_offset;
+
+        // skip if this piece does not correspond current file
+        if (!(withing_file or starts_in_file or ends_in_file))
+            continue;
+
+        file.fd.seekTo(if (withing_file)
+            write_start - file_start_offset
+        else if (starts_in_file)
+            0 // TODO
+        else if (ends_in_file)
+            0) catch return Error.WriteFailed;
+
+        const can_write = if (withing_file)
+            task.payload.len
+        else if (starts_in_file)
+            0 // TODO
+        else if (ends_in_file)
+            0; // TODO
+
+        std.debug.assert(0 < can_write and can_write <= task.payload.len);
+
+        var j = 0; // TODO
+        while (j != can_write) {
+            const n = file.fd.write(task.payload[j..can_write]) catch return Error.WriteFailed;
+            j += n;
+            left -= n;
+        }
+    }
+
+    std.debug.assert(left == 0);
+}
+
 /// Calculates SHA1 on the piece payload
 fn checkIntegrity(self: *Self, task: IOMessage) bool {
     std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
@@ -161,7 +225,7 @@ fn ensureSingleFile(self: *Self) !void {
 
     try self.files.append(self.alloc, .{
         .fd = file,
-        .size = self.torr.info.mode.length,
+        .end_offset = self.torr.download_size,
     });
 }
 
@@ -198,7 +262,7 @@ fn ensureMultiFile(self: *Self) !void {
         file_sum += file.length;
 
         self.files.appendAssumeCapacity(.{
-            .size = file_sum,
+            .end_offset = file_sum,
             .fd = fd,
         });
     }

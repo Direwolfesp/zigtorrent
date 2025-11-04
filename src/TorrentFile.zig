@@ -264,14 +264,14 @@ pub fn getType(self: *const TorrentFile) TorrentType {
 pub fn calculatePieceSize(self: *const TorrentFile, index: usize) !i64 {
     const num_whole_pieces = try std.math.divFloor(
         i64,
-        self.info.length,
+        self.download_size,
         self.info.piece_length,
     );
     std.debug.assert(index >= 0 and index <= num_whole_pieces);
     return if (index < num_whole_pieces)
         self.info.piece_length
     else
-        self.info.length - num_whole_pieces * self.info.piece_length;
+        self.download_size - num_whole_pieces * self.info.piece_length;
 }
 
 /// Parses the given torrent file and retreives its contents.
