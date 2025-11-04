@@ -63,7 +63,7 @@ pub fn init(torr: *const TorrentFile) !Tracker {
         .announce_url = torr.announce,
         .info_hash = torr.info_hash,
         .peer_id = try genPeerId(),
-        .left = @intCast(torr.calculateDownloadSize()),
+        .left = @intCast(torr.download_size),
     };
 }
 

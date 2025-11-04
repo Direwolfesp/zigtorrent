@@ -33,6 +33,8 @@ created_by: ?[]const u8,
 info: Info,
 /// hash of the info dictionary
 info_hash: [Sha1.digest_length]u8,
+/// effective total download size
+download_size: i64 = 0,
 
 const Info = struct {
     /// number of bytes in each piece
@@ -200,7 +202,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
         break :blk files;
     };
 
-    return TorrentFile{
+    var res = TorrentFile{
         .value = value,
         .announce = announce.string,
         .creation_date = creation_date,
@@ -219,6 +221,10 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
                 @panic("Torrentfile can't be single and multifile at the same time.\n"),
         },
     };
+
+    res.initDownloadSize();
+
+    return res;
 }
 
 pub fn deinit(self: *TorrentFile, alloc: Allocator) void {
@@ -233,21 +239,22 @@ pub fn deinit(self: *TorrentFile, alloc: Allocator) void {
     self.value.deinit(alloc);
 }
 
-pub fn getType(self: *const TorrentFile) TorrentType {
-    return switch (self.info.mode) {
-        .files => .MultiFile,
-        .length => .SingleFile,
-    };
-}
-
-pub fn calculateDownloadSize(self: *const TorrentFile) i64 {
-    return switch (self.getType()) {
+/// Calculates the torrent download size, it should be called once
+fn initDownloadSize(self: *TorrentFile) void {
+    self.download_size = switch (self.getType()) {
         .MultiFile => blk: {
             var total: i64 = 0;
             for (self.info.mode.files) |f| total += f.length;
             break :blk total;
         },
         .SingleFile => self.info.mode.length,
+    };
+}
+
+pub fn getType(self: *const TorrentFile) TorrentType {
+    return switch (self.info.mode) {
+        .files => .MultiFile,
+        .length => .SingleFile,
     };
 }
 

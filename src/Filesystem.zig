@@ -135,9 +135,9 @@ fn checkIntegrity(self: *Self, task: IOMessage) bool {
     return std.mem.eql(u8, &result, &self.torr.info.pieces[task.index]);
 }
 
-/// TODO: it should make sure the file/files
+/// It makes sure the file/files
 /// are created in the filesystem. If they already
-/// existed, that might considered an error
+/// exist thats considered an error
 pub fn ensureFsStructure(self: *Self) !void {
     switch (self.torr.getType()) {
         .SingleFile => try self.ensureSingleFile(),
@@ -170,6 +170,7 @@ fn ensureSingleFile(self: *Self) !void {
 fn ensureMultiFile(self: *Self) !void {
     try self.files.ensureTotalCapacityPrecise(self.alloc, self.torr.info.mode.files.len);
 
+    var file_sum: i64 = 0;
     for (self.torr.info.mode.files) |file| {
         const path_components = try self.alloc.alloc([]const u8, file.path.len + 1); // +1 for the base
         defer self.alloc.free(path_components);
@@ -194,8 +195,10 @@ fn ensureMultiFile(self: *Self) !void {
             },
         };
 
+        file_sum += file.length;
+
         self.files.appendAssumeCapacity(.{
-            .size = file.length,
+            .size = file_sum,
             .fd = fd,
         });
     }
