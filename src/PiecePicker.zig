@@ -16,9 +16,13 @@ const DownloadingPiece = struct {
     block_state: std.ArrayList(BlockState),
 
     const BlockState = enum(u8) {
+        ///
         Open,
+        /// block has been requested from the peer
         Requested,
+        /// block has been downloaded and dispatched to filesystem
         Writing,
+        /// block already verified and written to disk
         Finished,
     };
 };

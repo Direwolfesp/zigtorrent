@@ -67,25 +67,29 @@ const IOMessage = struct {
 alloc: std.mem.Allocator,
 /// The current torrent
 torr: *const TorrentFile,
-/// file structure fo the torrent. Files sorted in the same order they appear in the torrent.
+/// file structure of the torrent. Files have the same order as they appear in the metainfo.
 /// Directories are omitted
 files: std.ArrayList(FileInfo),
-/// lock free SCSP queues
+/// disk requests are stored here
 submission_queue: MessageQueue,
+/// written pieces are notified back here to the client
 completion_queue: MessageQueue,
+/// for checking integrity
+hasher: std.crypto.hash.Sha1,
 
 const FileInfo = struct {
     fd: std.fs.File,
     size: i64,
 };
 
-pub fn init(alloc: std.mem.Allocator, torr: *const TorrentFile) !Self {
+pub fn init(alloc: std.mem.Allocator, torr: *const TorrentFile, queue_bufsize: usize) !Self {
     return .{
         .alloc = alloc,
         .torr = torr,
-        .completion_queue = try .initCapacity(alloc, 1024),
-        .submission_queue = try .initCapacity(alloc, 1024),
+        .completion_queue = try .initCapacity(alloc, queue_bufsize),
+        .submission_queue = try .initCapacity(alloc, queue_bufsize),
         .files = .empty,
+        .hasher = .init(.{}),
     };
 }
 
@@ -122,13 +126,22 @@ pub fn processTask() void {
     // queue
 }
 
+/// Calculates SHA1 on the piece payload
+fn checkIntegrity(self: *Self, task: IOMessage) bool {
+    std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
+    std.debug.assert(task.status == .RequestStore);
+    self.hasher.update(task.payload);
+    const result = self.hasher.finalResult();
+    return std.mem.eql(u8, &result, &self.torr.info.pieces[task.index]);
+}
+
+/// TODO: it should make sure the file/files
+/// are created in the filesystem. If they already
+/// existed, that might considered an error
 pub fn ensureFsStructure(self: Self) !void {
-    // TODO: it should make sure the file/files
-    // are created in the filesystem. If they already
-    // existed, that might considered an error
     switch (self.torr.getType()) {
         .SingleFile => try self.ensureSingleFile(),
-        .MultiFile => {},
+        .MultiFile => try self.ensureMultiFile(),
     }
 }
 
@@ -152,23 +165,72 @@ fn ensureSingleFile(self: *Self) !void {
     });
 }
 
-fn ensureMultiFile(self: Self) !void {
-    // TODO:
-    _ = self;
+/// Creates the directory structure specfied in the multifile torrent and stores
+/// references to the files in the same order the appear in the torrent
+fn ensureMultiFile(self: *Self) !void {
+    try self.files.ensureTotalCapacityPrecise(self.alloc, self.torr.info.mode.files.len);
+
+    for (self.torr.info.mode.files) |file| {
+        const path_components = try self.alloc.alloc([]const u8, file.path.len + 1); // +1 for the base
+        defer self.alloc.free(path_components);
+
+        // first path component is always the torrent name
+        path_components[0] = self.torr.info.name;
+        @memcpy(path_components[1..], file.path);
+
+        const fullpath = try std.fs.path.join(self.alloc, path_components);
+        defer self.alloc.free(fullpath);
+
+        // the torrent name always acts as a dirname, so its safe to unwrap
+        try std.fs.cwd().makePath(std.fs.path.dirname(fullpath).?);
+
+        const fd = std.fs.cwd().createFile(fullpath, .{ .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                log.err("File '{s}' already exists. Delete it first before downloading it again", .{fullpath});
+                return err;
+            },
+            else => {
+                log.err("Could not create file: '{t}'", .{err});
+                return err;
+            },
+        };
+
+        self.files.appendAssumeCapacity(.{
+            .size = file.length,
+            .fd = fd,
+        });
+    }
 }
 
-test "disk_io: create single file" {
+test "fs_manager: ensure multi file" {
+    const alloc = std.testing.allocator;
+
+    var torr = try TorrentFile.open(alloc, "src/tests/torrents/BigBuckBunny_124_archive.torrent");
+    defer torr.deinit(alloc);
+
+    var fs_manager = try Self.init(alloc, &torr.meta, 1024);
+    defer fs_manager.deinit();
+
+    try fs_manager.ensureMultiFile();
+    defer std.fs.cwd().deleteTree(torr.meta.info.name) catch |err| {
+        log.err("Could not delete test dir... Error: {t}", .{err});
+    };
+
+    try testing.expectEqual(fs_manager.files.items.len, fs_manager.torr.info.mode.files.len);
+}
+
+test "fs_manager: ensure single file" {
     const alloc = std.testing.allocator;
 
     var torr = try TorrentFile.open(alloc, "src/tests/torrents/debian-12.11.0-amd64-netinst.iso.torrent");
     defer torr.deinit(alloc);
 
-    var fs_manager = try Self.init(alloc, &torr.meta);
+    var fs_manager = try Self.init(alloc, &torr.meta, 1024);
     defer fs_manager.deinit();
 
     try fs_manager.ensureSingleFile();
-    defer std.fs.cwd().deleteFile("debian-12.11.0-amd64-netinst.iso") catch {
-        log.err("Could not delete test file...", .{});
+    defer std.fs.cwd().deleteFile("debian-12.11.0-amd64-netinst.iso") catch |err| {
+        log.err("Could not delete test file... Error: {t}", .{err});
     };
 
     try testing.expectEqual(fs_manager.files.items.len, 1);

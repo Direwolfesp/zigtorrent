@@ -10,7 +10,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const spsc = b.dependency("spsc_queue", .{});
+    const spsc = b.dependency("spsc_queue", .{
+        .target = target,
+        .optimize = optimize,
+    });
     exe_mod.addImport("spsc_queue", spsc.module("spsc_queue"));
 
     const exe = b.addExecutable(.{

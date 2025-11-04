@@ -11,6 +11,10 @@ pub fn main() !void {
     const alloc = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
+    var buf: [2048]u8 = undefined;
+    var stdout_w = std.fs.File.stdout().writer(&buf);
+    const stdout = &stdout_w.interface;
+
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
@@ -25,6 +29,7 @@ pub fn main() !void {
 
     var timer = try std.time.Timer.start();
     var torrent = try TorrentFile.open(alloc, filename);
+    defer torrent.deinit(alloc);
     const parse_torrent_time = timer.lap();
 
     var tracker = try Tracker.init(&torrent.meta);
@@ -36,18 +41,15 @@ pub fn main() !void {
     log.debug("Parsed torrent in {D}", .{parse_torrent_time});
     log.debug("Got peers from tracker in {D}", .{get_peers_timer});
 
-    var stdout_w = std.fs.File.stdout().writer(&.{});
-    const stdout = &stdout_w.interface;
+    try torrent.meta.printMetaInfo(alloc, stdout);
     try tracker.printState(stdout);
     try stdout.flush();
-
-    defer torrent.deinit(alloc);
 }
 
 test {
     _ = std.testing.refAllDecls(@This());
     _ = Message;
-    _ = @import("DiskIO.zig");
+    _ = @import("Filesystem.zig");
 }
 
 const log = std.log.scoped(.main);
