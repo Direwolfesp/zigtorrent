@@ -85,8 +85,6 @@ files: std.ArrayList(FileInfo),
 submission_queue: MessageQueue,
 /// written pieces are notified back here to the client
 completion_queue: MessageQueue,
-/// for checking integrity
-hasher: std.crypto.hash.Sha1,
 
 pub fn init(alloc: std.mem.Allocator, torr: *const TorrentFile, queue_bufsize: usize) !Self {
     return .{
@@ -95,7 +93,6 @@ pub fn init(alloc: std.mem.Allocator, torr: *const TorrentFile, queue_bufsize: u
         .completion_queue = try .initCapacity(alloc, queue_bufsize),
         .submission_queue = try .initCapacity(alloc, queue_bufsize),
         .files = .empty,
-        .hasher = .init(.{}),
     };
 }
 
@@ -116,10 +113,10 @@ pub fn submit(self: *Self, task: IOMessage) void {
 }
 
 // Pop from completion queue, null if empty
-pub fn receive(self: Self) ?*IOMessage {
+pub fn receive(self: Self) ?IOMessage {
     if (self.completion_queue.front()) |ret| {
-        self.completion_queue.pop();
-        return ret;
+        defer self.completion_queue.pop();
+        return ret.*;
     }
     return null;
 }
@@ -143,13 +140,14 @@ pub fn processTask(self: Self) void {
             .request_store => {
                 defer self.completion_queue.push(task.*);
                 if (!self.checkIntegrity(task)) {
+                    log.warn("Piece #{d} failed integrity check.", .{task.index});
                     task.status = .integrity_failed;
-                    return;
+                    continue;
                 }
                 self.writePiece(task.*) catch |err| {
-                    log.err("Could not write piece {d}. Error: {t}", .{ task.index, err });
+                    log.err("Could not write piece #{d}. Error: {t}", .{ task.index, err });
                     task.status = .write_failed;
-                    return;
+                    continue;
                 };
                 task.status = .store_success;
             },
@@ -207,8 +205,8 @@ fn writePiece(self: Self, task: IOMessage) !void {
 fn checkIntegrity(self: *Self, task: *const IOMessage) bool {
     std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
     std.debug.assert(task.status == .request_store);
-    self.hasher.update(task.payload);
-    const result = self.hasher.finalResult();
+    var result: [Sha1.digest_length]u8 = undefined;
+    Sha1.hash(task.payload, &result, .{});
     return std.mem.eql(u8, &result, &self.torr.info.pieces[task.index]);
 }
 
@@ -247,7 +245,11 @@ fn ensureSingleFile(self: *Self) !void {
 fn ensureMultiFile(self: *Self) !void {
     try self.files.ensureTotalCapacityPrecise(self.alloc, self.torr.info.mode.files.len);
 
+    var path_buf: [std.posix.PATH_MAX]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
+    const buffer_alloc = fba.allocator();
     var file_sum: i64 = 0;
+
     for (self.torr.info.mode.files) |file| {
         const path_components = try self.alloc.alloc([]const u8, file.path.len + 1); // +1 for the base
         defer self.alloc.free(path_components);
@@ -256,8 +258,9 @@ fn ensureMultiFile(self: *Self) !void {
         path_components[0] = self.torr.info.name;
         @memcpy(path_components[1..], file.path);
 
-        const fullpath = try std.fs.path.join(self.alloc, path_components);
-        defer self.alloc.free(fullpath);
+        const fullpath = try std.fs.path.join(buffer_alloc, path_components);
+        defer buffer_alloc.free(fullpath);
+
         // the torrent name always acts as a dirname, so its safe to unwrap
         try std.fs.cwd().makePath(std.fs.path.dirname(fullpath).?);
 
@@ -271,7 +274,7 @@ fn ensureMultiFile(self: *Self) !void {
                 return err;
             },
         };
-
+        log.debug("Created file '{s}'", .{fullpath});
         file_sum += file.length;
 
         self.files.appendAssumeCapacity(.{
@@ -318,6 +321,7 @@ test "fs_manager: ensure single file" {
 const log = std.log.scoped(.filesystem);
 
 const std = @import("std");
+const Sha1 = std.crypto.hash.Sha1;
 const testing = std.testing;
 
 const spsc = @import("spsc_queue");
