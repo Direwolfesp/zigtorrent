@@ -17,13 +17,13 @@ const DownloadingPiece = struct {
 
     const BlockState = enum(u8) {
         ///
-        Open,
+        open,
         /// block has been requested from the peer
-        Requested,
+        requested,
         /// block has been downloaded and dispatched to filesystem
-        Writing,
+        writing,
         /// block already verified and written to disk
-        Finished,
+        finished,
     };
 };
 

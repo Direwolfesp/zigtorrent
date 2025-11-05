@@ -50,13 +50,15 @@ const Self = @This();
 const IOMessage = struct {
     status: enum(u8) {
         /// The piece has been written to disk succesfully
-        StoreSuccess,
+        store_success,
         /// Tells it wants to write the downloaded piece to disk
-        RequestStore,
+        request_store,
+        /// Used to comunicate to the filesystem thread to stop all activity
+        shutdown,
         /// piece didnt pass the integrity check
-        IntegrityFailed,
+        integrity_failed,
         /// other fs error
-        WriteFailed,
+        write_failed,
     },
     /// piece index
     index: u32,
@@ -130,24 +132,30 @@ pub fn receive(self: Self) ?*IOMessage {
 /// Once is done, push message to completion
 /// queue, otherwise mark it as incomplete.
 pub fn processTask(self: Self) void {
-    const task: *IOMessage = self.submission_queue.front() orelse return;
-    self.submission_queue.pop();
-
-    if (task.status == .RequestStore) {
-        defer self.completion_queue.push(task.*);
-
-        if (!self.checkIntegrity(task)) {
-            task.status = .IntegrityFailed;
-            return;
-        }
-
-        self.writePiece(task.*) catch |err| {
-            log.err("Could not write piece {d}. Error: {t}", .{ task.index, err });
-            task.status = .WriteFailed;
-            return;
+    while (true) {
+        const task: *IOMessage = self.submission_queue.front() orelse {
+            std.Thread.sleep(30 * std.time.ns_per_ms);
+            continue;
         };
+        self.submission_queue.pop();
 
-        task.status = .StoreSuccess;
+        switch (task.status) {
+            .request_store => {
+                defer self.completion_queue.push(task.*);
+                if (!self.checkIntegrity(task)) {
+                    task.status = .integrity_failed;
+                    return;
+                }
+                self.writePiece(task.*) catch |err| {
+                    log.err("Could not write piece {d}. Error: {t}", .{ task.index, err });
+                    task.status = .write_failed;
+                    return;
+                };
+                task.status = .store_success;
+            },
+            .shutdown => break,
+            else => unreachable,
+        }
     }
 }
 
@@ -198,7 +206,7 @@ fn writePiece(self: Self, task: IOMessage) !void {
 /// Calculates SHA1 on the piece payload
 fn checkIntegrity(self: *Self, task: *const IOMessage) bool {
     std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
-    std.debug.assert(task.status == .RequestStore);
+    std.debug.assert(task.status == .request_store);
     self.hasher.update(task.payload);
     const result = self.hasher.finalResult();
     return std.mem.eql(u8, &result, &self.torr.info.pieces[task.index]);

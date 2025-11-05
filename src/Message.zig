@@ -7,16 +7,16 @@ const log = std.log.scoped(.Message);
 /// KeepAlive is not considered an ID but is here for convenience.
 /// Order matters.
 const Type = enum(i8) {
-    KeepAlive = -1,
-    Choke = 0,
-    Unchoke = 1,
-    Interested = 2,
-    NotInterested = 3,
-    Have = 4,
-    Bitfield = 5,
-    Request = 6,
-    Piece = 7,
-    Cancel = 8,
+    keep_alive = -1,
+    choke = 0,
+    unchoke = 1,
+    interested = 2,
+    not_interested = 3,
+    have = 4,
+    bitfield = 5,
+    request = 6,
+    piece = 7,
+    cancel = 8,
 };
 
 const Self = @This();
@@ -33,17 +33,17 @@ const Error = error{
 
 pub fn deinit(self: Self, alloc: std.mem.Allocator) void {
     switch (self.id) {
-        .KeepAlive,
-        .Choke,
-        .Unchoke,
-        .Interested,
-        .NotInterested,
+        .keep_alive,
+        .choke,
+        .unchoke,
+        .interested,
+        .not_interested,
         => {},
-        .Bitfield,
-        .Have,
-        .Piece,
-        .Request,
-        .Cancel,
+        .bitfield,
+        .have,
+        .piece,
+        .request,
+        .cancel,
         => alloc.free(self.payload.?),
     }
 }
@@ -53,7 +53,7 @@ pub fn read(reader: *std.Io.Reader, alloc: std.mem.Allocator) !Self {
     const len = try reader.takeInt(u32, .big);
     if (len == 0) {
         return .{
-            .id = .KeepAlive,
+            .id = .keep_alive,
             .payload = null,
         };
     }
@@ -74,23 +74,23 @@ pub fn read(reader: *std.Io.Reader, alloc: std.mem.Allocator) !Self {
 /// Flush is needed.
 pub fn write(self: Self, writer: *std.Io.Writer) !void {
     switch (self.id) {
-        .KeepAlive => {
+        .keep_alive => {
             std.debug.assert(self.payload == null);
             try writer.writeInt(u32, 0, .big);
         },
-        .Choke,
-        .Unchoke,
-        .Interested,
-        .NotInterested,
+        .choke,
+        .unchoke,
+        .interested,
+        .not_interested,
         => {
             try writer.writeInt(u32, 1, .big);
             try writer.writeByte(@intCast(@intFromEnum(self.id)));
         },
-        .Bitfield,
-        .Have,
-        .Piece,
-        .Request,
-        .Cancel,
+        .bitfield,
+        .have,
+        .piece,
+        .request,
+        .cancel,
         => {
             try writer.writeInt(u32, @intCast(self.payload.?.len + 1), .big);
             try writer.writeByte(@intCast(@intFromEnum(self.id)));
@@ -103,7 +103,7 @@ test "message: read keep alive" {
     const alloc = testing.allocator;
     var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0x00, 0x00 });
     const msg = try Self.read(&r, alloc);
-    try testing.expect(msg.id == Type.KeepAlive);
+    try testing.expect(msg.id == Type.keep_alive);
     try testing.expect(msg.payload == null);
 }
 
@@ -112,19 +112,19 @@ test "message: read choke, unchoke... (messages with no payload but with Id)" {
     {
         var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0x00, 0x01, 0x00 });
         const msg = try Self.read(&r, alloc);
-        try testing.expect(msg.id == .Choke);
+        try testing.expect(msg.id == .choke);
         try testing.expect(msg.payload == null);
     }
     {
         var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0x00, 0x01, 0x01 });
         const msg = try Self.read(&r, alloc);
-        try testing.expect(msg.id == .Unchoke);
+        try testing.expect(msg.id == .unchoke);
         try testing.expect(msg.payload == null);
     }
     {
         var r: std.Io.Reader = .fixed(&.{ 0x00, 0x00, 0x00, 0x01, 0x02 });
         const msg = try Self.read(&r, alloc);
-        try testing.expect(msg.id == .Interested);
+        try testing.expect(msg.id == .interested);
         try testing.expect(msg.payload == null);
     }
 }
@@ -138,7 +138,7 @@ test "message: read have" {
     });
     const msg = try Self.read(&r, alloc);
     defer msg.deinit(alloc);
-    try testing.expect(msg.id == .Have);
+    try testing.expect(msg.id == .have);
     try testing.expect(msg.payload != null);
     try testing.expect(msg.payload.?.len == 4);
     try testing.expect(std.mem.readInt(u32, msg.payload.?[0..4], .little) == 4025413131);
@@ -161,7 +161,7 @@ test "message: read piece" {
     });
     const msg = try Self.read(&r, alloc);
     defer msg.deinit(alloc);
-    try testing.expect(msg.id == .Piece);
+    try testing.expect(msg.id == .piece);
     try testing.expect(msg.payload != null);
     try testing.expect(msg.payload.?.len == 36);
     try testing.expect(std.mem.readInt(u32, msg.payload.?[0..4], .little) == 500);
@@ -175,7 +175,7 @@ test "message: roundtrip request" {
     var w: std.Io.Writer = .fixed(&buf);
 
     const msg = Self{
-        .id = .Request,
+        .id = .request,
         .payload = &.{
             0x12, 0x00, 0x00, 0x00, // index
             0x00, 0x12, 0x00, 0x00, // begin
