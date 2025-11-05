@@ -122,12 +122,33 @@ pub fn receive(self: Self) ?*IOMessage {
     return null;
 }
 
-pub fn processTask() void {
-    // TODO: pop from the submission queue and
-    // process the task, which will be: hashing the piece,
-    // check integrity and write it to disk.
-    // Once is done, push message to completion
-    // queue
+/// TEST:
+/// Pop's from the submission queue and
+/// processes the task, which consists of:
+/// - checking piece integrity
+/// - writing it to disk
+/// Once is done, push message to completion
+/// queue, otherwise mark it as incomplete.
+pub fn processTask(self: Self) void {
+    const task: *IOMessage = self.submission_queue.front() orelse return;
+    self.submission_queue.pop();
+
+    if (task.status == .RequestStore) {
+        defer self.completion_queue.push(task.*);
+
+        if (!self.checkIntegrity(task)) {
+            task.status = .IntegrityFailed;
+            return;
+        }
+
+        self.writePiece(task.*) catch |err| {
+            log.err("Could not write piece {d}. Error: {t}", .{ task.index, err });
+            task.status = .WriteFailed;
+            return;
+        };
+
+        task.status = .StoreSuccess;
+    }
 }
 
 /// Attempts to write piece content to the corresponding file(s).
@@ -175,7 +196,7 @@ fn writePiece(self: Self, task: IOMessage) !void {
 }
 
 /// Calculates SHA1 on the piece payload
-fn checkIntegrity(self: *Self, task: IOMessage) bool {
+fn checkIntegrity(self: *Self, task: *const IOMessage) bool {
     std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
     std.debug.assert(task.status == .RequestStore);
     self.hasher.update(task.payload);
