@@ -44,6 +44,11 @@
 //! Piece 3  |  file2  |  file3  |  file4  |
 //!          |         |         |         |
 //!          + --------+---------+-------- +
+//!
+//! TODO: How do we manage the buffers passed between network thread and
+//! filesystem thread?? Currently, if you submit a buffer to write, the network
+//! thread cannot safetely reuse that buffer for other piece...
+//! see https://www.libtorrent.org/features-ref.html#disk-i-o
 
 const Self = @This();
 
@@ -69,6 +74,7 @@ const IOMessage = struct {
 const FileInfo = struct {
     fd: std.fs.File,
     end_offset: i64,
+    mmap_file: []align(std.heap.page_size_min) u8,
 };
 
 const Error = error{
@@ -101,8 +107,13 @@ pub fn deinit(self: *Self) void {
     self.completion_queue.deinit(self.alloc);
     self.submission_queue.deinit(self.alloc);
 
-    for (self.files.items) |file_info|
+    for (self.files.items) |file_info| {
         file_info.fd.close();
+        std.posix.msync(file_info.mmap_file, std.posix.MSF.SYNC) catch |err| {
+            log.err("Couldn't sync files to disk. Error: {t}", .{err});
+        };
+        std.posix.munmap(file_info.mmap_file);
+    }
     self.files.deinit(self.alloc);
 }
 
@@ -121,7 +132,6 @@ pub fn receive(self: Self) ?IOMessage {
     return null;
 }
 
-/// TEST:
 /// Pop's from the submission queue and
 /// processes the task, which consists of:
 /// - checking piece integrity
@@ -167,16 +177,10 @@ fn writePiece(self: Self, task: IOMessage) !void {
     const write_start: i64 = task.index * self.torr.info.piece_length;
     const write_end: i64 = write_start + task.payload.len;
 
-    // number of bytes to be written
-    var left = task.payload.len;
-
+    var left = task.payload.len; // number of bytes to be written
     var file_start_offset: i64 = 0; // starting byte of the current file
-    var file_buf: [8192]u8 = undefined;
 
     for (self.files.items) |*file| {
-        var writer = file.fd.writer(&file_buf);
-        const file_writer = &writer.interface;
-
         defer file_start_offset = file.end_offset;
 
         const region_start: i64 = @max(write_start, file_start_offset);
@@ -190,9 +194,10 @@ fn writePiece(self: Self, task: IOMessage) !void {
         const payload_start = region_start - write_start;
         const payload_end = region_end - write_start;
 
-        try writer.seekTo(file_offset);
-        try file_writer.writeAll(task.payload[payload_start..payload_end]);
-        try file_writer.flush();
+        @memcpy(
+            file.mmap_file[file_offset .. file_offset + (payload_end - payload_start)],
+            task.payload[payload_start..payload_end],
+        );
 
         left -= payload_end - payload_start;
         if (left == 0) break;
@@ -223,7 +228,10 @@ pub fn ensureFsStructure(self: *Self) !void {
 /// Creates the downloading file
 fn ensureSingleFile(self: *Self) !void {
     const filename = self.torr.info.name;
-    const file = std.fs.cwd().createFile(filename, .{ .exclusive = true }) catch |err| switch (err) {
+    const file = std.fs.cwd().createFile(filename, .{
+        .exclusive = true,
+        .read = true,
+    }) catch |err| switch (err) {
         error.PathAlreadyExists => {
             log.warn("File '{s}' already exists. Delete it first before downloading it again", .{filename});
             return err;
@@ -234,9 +242,20 @@ fn ensureSingleFile(self: *Self) !void {
         },
     };
 
+    try file.setEndPos(@intCast(self.torr.download_size));
+    const mmap_file = try std.posix.mmap(
+        null,
+        @intCast(self.torr.download_size),
+        std.posix.PROT.WRITE,
+        .{ .TYPE = .SHARED },
+        file.handle,
+        0,
+    );
+
     try self.files.append(self.alloc, .{
         .fd = file,
         .end_offset = self.torr.download_size,
+        .mmap_file = mmap_file,
     });
 }
 
@@ -264,7 +283,10 @@ fn ensureMultiFile(self: *Self) !void {
         // the torrent name always acts as a dirname, so its safe to unwrap
         try std.fs.cwd().makePath(std.fs.path.dirname(fullpath).?);
 
-        const fd = std.fs.cwd().createFile(fullpath, .{ .exclusive = true }) catch |err| switch (err) {
+        const fd = std.fs.cwd().createFile(fullpath, .{
+            .exclusive = true,
+            .read = true,
+        }) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 log.warn("File '{s}' already exists. Delete it first before downloading it again", .{fullpath});
                 return err;
@@ -277,9 +299,20 @@ fn ensureMultiFile(self: *Self) !void {
         log.debug("Created file '{s}'", .{fullpath});
         file_sum += file.length;
 
+        try fd.setEndPos(@intCast(file.length));
+        const mmap_file = try std.posix.mmap(
+            null,
+            @intCast(file.length),
+            std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            fd.handle,
+            0,
+        );
+
         self.files.appendAssumeCapacity(.{
             .end_offset = file_sum,
             .fd = fd,
+            .mmap_file = mmap_file,
         });
     }
 }

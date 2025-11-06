@@ -1,3 +1,13 @@
+//! The operations of the piece picker are:
+//! - pick one or more pieces for peer p
+//!   (this is to determine what to download from a peer)
+//! - increment availability counter for piece i
+//!   (when a peer announces that it just completed downloading a new piece)
+//! - decrement availability counters for all pieces of peer p
+//!   (when a peer leaves the swarm)
+//! - increment availability counters for all pieces of peer p
+//!   (when a peer joins the swarm)
+
 const Self = @This();
 
 const PiecePos = struct {
@@ -36,6 +46,19 @@ priority_boundaries: std.ArrayList(u32),
 /// piece_index -> DownloadingPiece
 downloading: std.AutoHashMap(u32, DownloadingPiece), // TODO: use a tree or something
 
+pub fn init() Self {
+    return .{
+        //
+    };
+}
+
+pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+    self.piece_map.deinit(alloc);
+    self.pieces.deinit(alloc);
+    self.priority_boundaries.deinit(alloc);
+    self.downloading.deinit(alloc);
+}
+
 /// Finding a rare piece for a peer:
 pub fn pick_piece(self: *const Self, have: std.DynamicBitSet) ?u32 {
     for (self.pieces.items) |p| {
@@ -45,6 +68,7 @@ pub fn pick_piece(self: *const Self, have: std.DynamicBitSet) ?u32 {
     return null; // we might want to enter end-game mode
 }
 
+/// TODO: understand this
 /// Incrementing piece availability
 pub fn inc_piece_refcount(self: *Self, piece: u32) void {
     const pieces = self.pieces.items;
@@ -63,6 +87,12 @@ pub fn inc_piece_refcount(self: *Self, piece: u32) void {
 
     std.mem.swap(u32, pieces[other_index], pieces[index]);
     std.mem.swap(?u32, piece_map[other_piece].index, piece_map[piece].index);
+}
+
+// TODO
+pub fn dec_piece_refcount(self: *Self, piece: u32) void {
+    _ = self; // autofix
+    _ = piece; // autofix
 }
 
 const std = @import("std");
