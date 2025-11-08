@@ -251,11 +251,22 @@ fn initDownloadSize(self: *TorrentFile) void {
     };
 }
 
+pub fn getNumPieces(self: *const TorrentFile) usize {
+    return self.info.pieces.len;
+}
+
 pub fn getType(self: *const TorrentFile) TorrentType {
     return switch (self.info.mode) {
         .files => .MultiFile,
         .length => .SingleFile,
     };
+}
+
+/// Number of blocks ceiled up so the last block could be smaller
+/// depending of piece index (last piece might be smalles).
+pub fn calculateNumBlocks(self: *const TorrentFile, piece: usize) !i64 {
+    const piece_size = try self.calculatePieceSize(piece);
+    return try std.math.divCeil(i64, piece_size, 0x4000);
 }
 
 /// calculate the piece length according to the index,

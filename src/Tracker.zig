@@ -68,7 +68,7 @@ pub fn init(torr: *const TorrentFile) !Tracker {
 }
 
 /// The same allocator used for `announce`
-// TODO: free the rest when we fisish the rest of the functions
+/// free the rest when we fisish the rest of the functions
 pub fn deinit(self: *Tracker, alloc: std.mem.Allocator) void {
     if (self.tracker_id) |id| {
         alloc.free(id);
