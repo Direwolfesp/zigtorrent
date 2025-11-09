@@ -52,24 +52,24 @@ priority_boundaries: std.ArrayList(u32),
 /// Stores information about each currently downloading piece. The key is the piece index.
 downloading: std.AutoHashMap(u32, DownloadingPiece),
 
-pub fn init(torrent: TorrentFile, alloc: std.mem.Allocator) Self {
+pub fn init(torrent: TorrentFile, alloc: std.mem.Allocator) !Self {
     const num_pieces = torrent.getNumPieces();
 
-    const piece_map: std.ArrayList(PiecePos) = try .initCapacity(alloc, num_pieces);
+    var piece_map: std.ArrayList(PiecePos) = try .initCapacity(alloc, num_pieces);
     errdefer piece_map.deinit(alloc);
 
-    const pieces: std.ArrayList(u32) = try .initCapacity(alloc, num_pieces);
+    var pieces: std.ArrayList(u32) = try .initCapacity(alloc, num_pieces);
     errdefer pieces.deinit(alloc);
 
     // fill in pieces with all the pieces and set its index and availability in
     // piece_map
     for (0..num_pieces) |i| {
         piece_map.appendAssumeCapacity(.{
-            .index = i,
+            .index = @intCast(i),
             .peer_count = 0,
             .state = false,
         });
-        pieces.appendAssumeCapacity(i);
+        pieces.appendAssumeCapacity(@intCast(i));
     }
 
     const downloading: std.AutoHashMap(u32, DownloadingPiece) = .init(alloc);
@@ -77,7 +77,7 @@ pub fn init(torrent: TorrentFile, alloc: std.mem.Allocator) Self {
     // initially all pieces belong to the first bucket of availability = 0
     var priority_boundaries: std.ArrayList(u32) = .empty;
     try priority_boundaries.append(alloc, 0);
-    try priority_boundaries.append(alloc, num_pieces);
+    try priority_boundaries.append(alloc, @intCast(num_pieces));
 
     return .{
         .downloading = downloading,
@@ -97,7 +97,7 @@ pub fn deinit(self: *Self) void {
     var values = self.downloading.valueIterator();
     while (values.next()) |elem|
         elem.block_state.deinit(self.alloc);
-    self.downloading.deinit(self.alloc);
+    self.downloading.deinit();
 }
 
 /// Finding a rare piece for a peer:

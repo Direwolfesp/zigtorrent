@@ -1,6 +1,6 @@
 const std = @import("std");
 const Message = @import("Message.zig");
-const TorrentFile = @import("../TorrentFile.zig");
+const TorrentFile = @import("TorrentFile.zig");
 
 const Self = @This();
 
@@ -30,7 +30,7 @@ pub fn deinit(self: Self, alloc: std.mem.Allocator) void {
 /// Sends the handshake to the client.
 /// Returns false if it didn't manage to write all the buffer,
 /// true if it could, this can be used to change the event loop mode.
-pub fn writeHandshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) Error!bool {
+pub fn writeHandshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) !bool {
     const handshk = HandShake.create(peer_id, torrent);
     const handshake_bytes: []const u8 = std.mem.asBytes(&handshk);
     const handshake_len = handshake_bytes.len;

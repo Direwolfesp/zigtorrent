@@ -7,8 +7,11 @@ efd: std.posix.fd_t,
 ready_list: [128]std.os.linux.epoll_event,
 
 pub fn init() !Epoll {
-    const efd = std.posix.epoll_create1(0);
-    return .{ .efd = efd };
+    const efd = try std.posix.epoll_create1(0);
+    return .{
+        .efd = efd,
+        .ready_list = undefined,
+    };
 }
 
 pub fn deinit(self: Epoll) void {
