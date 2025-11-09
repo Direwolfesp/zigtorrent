@@ -173,7 +173,7 @@ pub fn markPieceCompleted(self: *Self, piece: u32) void {
 
 /// Updates the BlockState for the given `block` from `piece`.
 /// asserts the block exists
-pub fn setBlockState(self: *Self, piece: u32, block: i64, state: BlockState) !bool {
+pub fn updateBlockState(self: *Self, piece: u32, block: i64, state: BlockState) !bool {
     if (self.downloading.get(piece)) |dl| {
         const num_blocks = try self.torrent.calculateNumBlocks(piece);
         std.debug.assert(num_blocks > block);
