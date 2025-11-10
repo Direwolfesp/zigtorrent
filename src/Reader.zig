@@ -1,9 +1,12 @@
 const std = @import("std");
 const posix = std.posix;
 const Message = @import("Message.zig");
+const HandShake = Message.HandShake;
 
 const Reader = @This();
 
+/// the peer socket
+socket: std.posix.socket_t = -1,
 /// internal buffer to store unprocessed messages
 buf: []u8,
 /// the right most index, where new data will be placed
@@ -25,7 +28,30 @@ pub fn deinit(self: *const Reader, allocator: std.mem.Allocator) void {
     allocator.free(self.buf);
 }
 
-pub fn readMessage(self: *Reader, alloc: std.mem.Allocator, socket: posix.socket_t) !?Message {
+pub fn readHandshake(self: *Reader) !?HandShake {
+    // as we are doing edge triggered reads, we might read
+    // until WouldBlock and handle the partial read.
+    while (self.pos - self.start < Message.HANDSHAKE_LEN) {
+        const spare = self.buf.len - self.pos;
+        if (spare == 0) return error.BufferTooSmall;
+
+        const n = posix.read(self.socket, self.buf[self.pos..]) catch |err| switch (err) {
+            error.WouldBlock => return null, // partial read
+            else => return err,
+        };
+        if (n == 0) return error.Closed;
+        self.pos += n;
+    }
+
+    const unprocessed = self.buf[self.start..self.pos];
+    const hs_bytes = unprocessed[0..Message.HANDSHAKE_LEN];
+
+    const hs: *HandShake = @ptrCast(hs_bytes[0..Message.HANDSHAKE_LEN]);
+    self.start += Message.HANDSHAKE_LEN;
+    return hs.*;
+}
+
+pub fn readMessage(self: *Reader, alloc: std.mem.Allocator) !?Message {
     var buf = self.buf;
 
     while (true) {
@@ -35,7 +61,7 @@ pub fn readMessage(self: *Reader, alloc: std.mem.Allocator, socket: posix.socket
         }
 
         const pos = self.pos;
-        const n = posix.read(socket, buf[pos..]) catch |err| switch (err) {
+        const n = posix.read(self.socket, buf[pos..]) catch |err| switch (err) {
             error.WouldBlock => return null,
             else => return err,
         };

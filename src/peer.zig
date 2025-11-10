@@ -1,41 +1,38 @@
-pub const State = struct {
+//!
+
+const SessionState = enum {
+    /// initial state
+    disconnected,
+    /// waiting for the peer to accept our connect()
+    connecting,
+    /// tcp connection stablished
+    connected,
+    /// interchanging handshakes
+    sending_handshake,
+    /// wating for his handshake
+    waiting_handshake,
+    /// registering peer bitfield/have
+    waiting_availability,
+    /// normal operation mode
+    normal,
+};
+
+pub const ConnectionStatus = struct {
     is_choked: bool = true,
     is_interested: bool = false,
     in_endgame: bool = false,
-    connection: enum {
-        /// initial state
-        disconnected,
-        /// waiting for the peer to accept our connect()
-        connecting,
-        /// tcp connection stablished
-        connected,
-        /// interchanging handshakes
-        handshaking,
-        /// registering peer bitfield/have
-        waiting_availability,
-        /// normal operation mode
-        normal,
-    } = .disconnected,
+    state: SessionState = .disconnected,
 };
 
-pub const Connection = struct {
+pub const PeerConnection = struct {
     loop: ?*Epoll,
     addr: std.net.Address,
     socket: std.posix.fd_t = -1,
     peer_bitfield: std.DynamicBitSetUnmanaged,
-    state: State = .{},
+    session: ConnectionStatus = .{},
 
     reader: Reader,
     writer: Writer,
-
-    /// If we are in slowstart, we increment by one when a block arrives.
-    //target_req_queue_len: u32 = 1,
-    /// default queue len
-    //current_req_queue_len: u32 = 5,
-    /// last time we received a block
-    //last_incoming_block_time: std.time.Instant,
-    /// last time we requested a block
-    //last_outgoing_request_time: std.time.Instant,
 
     const Self = @This();
 
@@ -60,7 +57,7 @@ pub const Connection = struct {
             .writer = writer,
             .reader = reader,
             .peer_bitfield = bitfield,
-            .state = .{},
+            .session = .{},
         };
     }
 
@@ -69,92 +66,183 @@ pub const Connection = struct {
         const sockfd = try std.posix.socket(self.addr.any.family, sock_flags, std.posix.IPPROTO.TCP);
 
         // connect non-blocking
-        const res: ?void = std.posix.connect(
-            sockfd,
-            &self.addr.any,
-            self.addr.getOsSockLen(),
-        ) catch |err| switch (err) {
-            error.WouldBlock => null,
-            else => return err,
-        };
+        while (true) {
+            std.posix.connect(
+                sockfd,
+                &self.addr.any,
+                self.addr.getOsSockLen(),
+            ) catch |err| switch (err) {
+                error.WouldBlock => {
+                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                    break;
+                },
+                else => return err,
+            };
+        }
 
         self.socket = sockfd;
         self.loop = loop;
+        self.writer.socket = sockfd;
+        self.reader.socket = sockfd;
+        self.session.state = .connected;
+        try self.loop.?.newClient(self); // OUT
 
-        if (res == null) {
-            self.state.connection = .connecting;
-            try loop.writeMode(self); // wait for EPOLLOUT
-        } else {
-            self.state.connection = .connected;
-            try loop.newClient(self); // register EPOLLIN
-        }
+        std.debug.print("New client added {f}\n", .{self.addr});
     }
 
-    pub fn disconnect(self: *Self, alloc: std.mem.Allocator) !void {
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) !void {
+        self.reader.deinit(alloc);
         self.writer.deinit(alloc);
         self.peer_bitfield.deinit(alloc);
-        if (self.loop) |l| {
+
+        if (self.loop) |l|
             try l.removeClient(self);
-        }
-        std.posix.close(self.socket);
+
+        if (self.socket != -1)
+            std.posix.close(self.socket);
     }
 
-    pub fn handshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) !void {
-        self.state.connection = .handshaking;
-        if (!(try self.writer.writeHandshake(peer_id, torrent))) {
-            try self.loop.?.writeMode(self);
+    pub fn init_handshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) !void {
+        std.debug.assert(self.socket != -1);
+        std.debug.assert(self.session.state == .connected);
+
+        // start handshake, if there is already a pending write, return
+        // PendingMessage
+        if (self.writer.to_write.len > 0) {
+            // we already have an outgoing message; ensure we're in write mode
+            // and wait for EPOLLOUT
+            self.loop.?.writeMode(self) catch |err| {
+                log.err("Could not set socket {d} for writing: {t}", .{ self.socket, err });
+            };
+            return;
+        }
+
+        self.session.state = .sending_handshake;
+        const written = try self.writer.writeHandshake(peer_id, torrent);
+
+        // if we didnt manage to write the handshake keep writing
+        if (!written) {
+            self.loop.?.writeMode(self) catch |err| {
+                log.err("Could not set socket {d} for writing: {t}", .{ self.socket, err });
+            };
         } else {
-            self.state.connection = .normal;
+            // switch to reading his handshake
+            self.session.state = .waiting_handshake;
+            self.loop.?.readMode(self) catch |err| {
+                log.err("Could not set socket {d} for reading: {t}", .{ self.socket, err });
+            };
+        }
+    }
+
+    pub fn recv_handshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) !void {
+        std.debug.assert(self.socket != -1);
+        std.debug.assert(self.session.state == .waiting_handshake);
+
+        const handshake = try self.reader.readHandshake();
+
+        if (handshake) |hs| {
+            if (hs.pstrlen != 19 or
+                !std.mem.eql(u8, &hs.pstr, "BitTorrent protocol") or
+                !std.mem.eql(u8, &hs.info_hash, &torrent.info_hash) or
+                !std.mem.eql(u8, &hs.peer_id, &peer_id))
+            {
+                log.err("Invalid handshake from peer {f}", .{self.addr});
+                return error.InvalidHandshake;
+            }
+            log.debug("Handshake received successfully, going to read mode", .{});
+            self.session.state = .waiting_availability;
             try self.loop.?.readMode(self);
+            return;
+        } else {
+            // Not enough bytes yet to form a full handshake. Caller should wait
+            // for more data.
+            return error.WouldBlock;
         }
     }
 };
 
-test "peer: handshake with peer (init + connect)" {
+test "peer: two way handshake with peer demo" {
     const alloc = std.testing.allocator;
 
-    var torr = try TorrentFile.open(alloc, "src/tests/torrents/debian-12.11.0-amd64-netinst.iso.torrent");
+    var torr = try TorrentFile.open(alloc, "tests/torrents/debian-12.11.0-amd64-netinst.iso.torrent");
     defer torr.deinit(alloc);
 
     var tr: Tracker = try .init(&torr.meta);
     defer tr.deinit(alloc);
     try tr.announce(alloc);
 
-    var picker: PiecePicker = try .init(torr.meta, alloc);
-    defer picker.deinit();
-
     var loop: Epoll = try .init();
     defer loop.deinit();
 
     const addr = std.net.Address{ .in = tr.peers.?[0] };
 
-    var client: Connection = try Connection.init(
+    var client: PeerConnection = try PeerConnection.init(
         alloc,
         addr,
         torr.meta.getNumPieces(),
         1024, // write buffer
         0x4000, // read buffer
     );
-    defer client.disconnect(alloc) catch |err| {
-        log.err("Error shutting down client '{any}': {t}", .{ client.addr, err });
+    defer client.deinit(alloc) catch |err| {
+        log.err("Error shutting down client '{f}': {t}", .{ client.addr, err });
     };
 
     try client.connect(&loop);
 
-    client.handshake(tr.peer_id, &torr.meta) catch |err| {
-        log.err("Could not handshake with peer '{any}': {t}", .{ addr, err });
-    };
+    while (true) {
+        const ready = loop.wait(-1);
+        std.debug.print("epoll wait returned {d} events\n", .{ready.len});
+        for (ready) |r| {
+            const c: *PeerConnection = @ptrFromInt(r.data.ptr);
 
-    try std.testing.expectEqual(client.state.connection, .normal);
+            if (r.events & linux.EPOLL.OUT != 0) {
+                // If there is pending outgoing bytes, flush them first.
+                if (c.writer.to_write.len > 0) {
+                    const finished = try c.writer.flush();
+                    if (!finished) continue;
+                }
+
+                switch (c.session.state) {
+                    .connected => {
+                        std.debug.print("handling connected: initiating handshake\n", .{});
+                        c.init_handshake(tr.peer_id, &torr.meta) catch |err| {
+                            log.err("Error could not handshake with peer '{f}': {t}", .{ c.addr, err });
+                            break;
+                        };
+                    },
+                    else => std.debug.print("unhandled state {t}\n", .{c.session.state}),
+                }
+            } else if (r.events & linux.EPOLL.IN != 0) {
+                switch (c.session.state) {
+                    .waiting_handshake => {
+                        std.debug.print("handling state 'waiting_handshake'\n", .{});
+                        c.recv_handshake(tr.peer_id, &torr.meta) catch |err| switch (err) {
+                            error.WouldBlock => {}, // incomplete handshake read
+                            else => {
+                                log.err("Error could not receive handshake from peer '{f}': {t}", .{ c.addr, err });
+                                try c.loop.?.removeClient(c);
+                                break;
+                            },
+                        };
+                        std.debug.print("handshake verified successfully !! \n", .{});
+                        return; // TEST: END
+                    },
+                    else => @panic("unhandled state \n"),
+                }
+            }
+        }
+    }
 }
 
 const log = std.log.scoped(.peer);
 
 const std = @import("std");
-const Message = @import("Message.zig");
-const Reader = @import("Reader.zig");
-const Writer = @import("Writer.zig");
+const linux = std.os.linux;
+
 const Epoll = @import("Epoll.zig");
+const Message = @import("Message.zig");
+const PiecePicker = @import("PiecePicker.zig");
+const Reader = @import("Reader.zig");
 const TorrentFile = @import("TorrentFile.zig");
 const Tracker = @import("Tracker.zig");
-const PiecePicker = @import("PiecePicker.zig");
+const Writer = @import("Writer.zig");

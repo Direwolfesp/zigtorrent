@@ -31,6 +31,24 @@ const Error = error{
     ReadFailed,
 };
 
+pub const HANDSHAKE_LEN: usize = 68;
+
+// we use extern struct for a defined memory layout
+pub const HandShake = extern struct {
+    pstrlen: u8 align(1) = 19,
+    pstr: [19]u8 align(1) = "BitTorrent protocol".*,
+    reserved: [8]u8 align(1) = std.mem.zeroes([8]u8),
+    info_hash: [20]u8 align(1) = undefined,
+    peer_id: [20]u8 align(1) = undefined,
+
+    pub fn create(peer_id: [20]u8, meta: *const TorrentFile) HandShake {
+        return HandShake{
+            .info_hash = meta.info_hash,
+            .peer_id = peer_id,
+        };
+    }
+};
+
 pub fn deinit(self: Self, alloc: std.mem.Allocator) void {
     if (self.payload) |payload| {
         alloc.free(payload);
@@ -122,31 +140,8 @@ test "message: read piece" {
     try testing.expect(std.mem.readInt(u32, msg.payload.?[4..8], .little) == 24);
 }
 
-//test "message: roundtrip request" {
-//    const alloc = std.testing.allocator;
-//    var buf: [1024]u8 = undefined;
-//    var r: std.Io.Reader = .fixed(&buf);
-//    var w: std.Io.Writer = .fixed(&buf);
-//
-//    const msg = Self{
-//        .id = .request,
-//        .payload = &.{
-//            0x12, 0x00, 0x00, 0x00, // index
-//            0x00, 0x12, 0x00, 0x00, // begin
-//            0x00, 0x00, 0x12, 0x00, // length
-//        },
-//    };
-//
-//    try msg.write(&w);
-//    const new = try Self.read(&r, alloc);
-//    defer new.deinit(alloc);
-//
-//    try testing.expect(msg.id == new.id);
-//    try testing.expect(mem.eql(u8, msg.payload.?[0..4], new.payload.?[0..4]));
-//    try testing.expect(mem.eql(u8, msg.payload.?[4..8], new.payload.?[4..8]));
-//    try testing.expect(mem.eql(u8, msg.payload.?[8..12], new.payload.?[8..12]));
-//}
-
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
+
+const TorrentFile = @import("TorrentFile.zig");

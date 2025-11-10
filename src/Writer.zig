@@ -1,5 +1,7 @@
 const std = @import("std");
+
 const Message = @import("Message.zig");
+const HandShake = Message.HandShake;
 const TorrentFile = @import("TorrentFile.zig");
 
 const Self = @This();
@@ -76,6 +78,7 @@ pub fn writeMessage(self: *Self, msg: Message) Error!bool {
 /// Returns false if it didn't manage to write all the buffer,
 /// true if otherwise.
 pub fn flush(self: *Self) !bool {
+    std.debug.assert(self.socket != -1);
     var buf = self.to_write;
     defer self.to_write = buf;
     while (buf.len > 0) {
@@ -89,19 +92,3 @@ pub fn flush(self: *Self) !bool {
         return true;
     }
 }
-
-// we use extern struct for a defined memory layout
-pub const HandShake = extern struct {
-    pstrlen: u8 align(1) = 19,
-    pstr: [19]u8 align(1) = "BitTorrent protocol".*,
-    reserved: [8]u8 align(1) = std.mem.zeroes([8]u8),
-    info_hash: [20]u8 align(1) = undefined,
-    peer_id: [20]u8 align(1) = undefined,
-
-    pub fn create(peer_id: [20]u8, meta: *const TorrentFile) HandShake {
-        return HandShake{
-            .info_hash = meta.info_hash,
-            .peer_id = peer_id,
-        };
-    }
-};
