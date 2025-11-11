@@ -26,7 +26,7 @@ pub fn wait(self: *Epoll, timeout_ms: i32) []linux.epoll_event {
 
 pub fn readMode(self: Epoll, client: *PeerConnection) !void {
     var event = linux.epoll_event{
-        .events = linux.EPOLL.IN | linux.EPOLL.ET,
+        .events = linux.EPOLL.IN,
         .data = .{ .ptr = @intFromPtr(client) },
     };
     try std.posix.epoll_ctl(self.efd, linux.EPOLL.CTL_MOD, client.socket, &event);
@@ -34,7 +34,7 @@ pub fn readMode(self: Epoll, client: *PeerConnection) !void {
 
 pub fn writeMode(self: Epoll, client: *PeerConnection) !void {
     var event = linux.epoll_event{
-        .events = linux.EPOLL.OUT | linux.EPOLL.ET,
+        .events = linux.EPOLL.OUT,
         .data = .{ .ptr = @intFromPtr(client) },
     };
     try std.posix.epoll_ctl(self.efd, linux.EPOLL.CTL_MOD, client.socket, &event);
@@ -42,7 +42,7 @@ pub fn writeMode(self: Epoll, client: *PeerConnection) !void {
 
 pub fn newClient(self: Epoll, client: *PeerConnection) !void {
     var event = linux.epoll_event{
-        .events = linux.EPOLL.OUT | linux.EPOLL.ET,
+        .events = linux.EPOLL.OUT,
         .data = .{ .ptr = @intFromPtr(client) },
     };
     try std.posix.epoll_ctl(self.efd, linux.EPOLL.CTL_ADD, client.socket, &event);

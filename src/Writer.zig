@@ -78,17 +78,12 @@ pub fn writeMessage(self: *Self, msg: Message) Error!bool {
 /// Returns false if it didn't manage to write all the buffer,
 /// true if otherwise.
 pub fn flush(self: *Self) !bool {
-    std.debug.assert(self.socket != -1);
-    var buf = self.to_write;
-    defer self.to_write = buf;
-    while (buf.len > 0) {
-        const n = std.posix.write(self.socket, buf) catch |err| switch (err) {
-            error.WouldBlock => return false,
-            else => return err,
+    const n = std.posix.write(self.socket, self.to_write) catch |err|
+        return switch (err) {
+            error.WouldBlock => false,
+            else => err,
         };
-        if (n == 0) return Error.Closed;
-        buf = buf[n..];
-    } else {
-        return true;
-    }
+    if (n == 0) return Error.Closed;
+    self.to_write = self.to_write[n..];
+    return self.to_write.len == 0;
 }

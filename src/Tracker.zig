@@ -233,13 +233,13 @@ fn parseResponse(
 
     const peers = response.get("peers") orelse {
         log.warn("Tracker did not respond with any peers.", .{});
-        return Error.MissingPeers;
+        return ParseError.PeersNotFound;
     };
 
     const parsed_peers: []std.net.Ip4Address = switch (peers) {
         .string => |str| try parsePeersBinary(alloc, str),
         .list => |list| try parsePeersDict(alloc, &list),
-        else => unreachable,
+        else => return ParseError.InvalidPeersFormat,
     };
 
     // TODO: I doubt this is the correct way (killing all old peers and
@@ -266,12 +266,12 @@ pub fn onDownload(self: *const Tracker, bytes: i64) void {
 const Error = error{
     NetworkFailure,
     ResponseFailure,
-    MissingPeers,
 };
 
 const ParseError = error{
     PeersNotFound,
     InvalidIpFormat,
+    InvalidPeersFormat,
     WrongPeerCount,
     MissingIp,
     MissingPort,
@@ -375,10 +375,9 @@ test "tracker: generate peer id" {
 
     inline for (0..20) |i| {
         switch (i) {
-            0 => try testing.expectEqual(id[i], '-'),
+            0, 7 => try testing.expectEqual(id[i], '-'),
             1...2 => try testing.expect(ascii.isAlphabetic(id[i])),
             3...6, 8...19 => try testing.expect(ascii.isDigit(id[i])),
-            7 => try testing.expectEqual(id[i], '-'),
             else => unreachable,
         }
     }

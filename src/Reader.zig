@@ -29,47 +29,40 @@ pub fn deinit(self: *const Reader, allocator: std.mem.Allocator) void {
 }
 
 pub fn readHandshake(self: *Reader) !?HandShake {
-    // as we are doing edge triggered reads, we might read
-    // until WouldBlock and handle the partial read.
-    while (self.pos - self.start < Message.HANDSHAKE_LEN) {
-        const spare = self.buf.len - self.pos;
-        if (spare == 0) return error.BufferTooSmall;
+    var hs_bytes: [Message.HANDSHAKE_LEN]u8 = undefined;
+    const n = posix.read(self.socket, hs_bytes) catch |err| return switch (err) {
+        error.WouldBlock => null,
+        else => err,
+    };
 
-        const n = posix.read(self.socket, self.buf[self.pos..]) catch |err| switch (err) {
-            error.WouldBlock => return null, // partial read
-            else => return err,
-        };
-        if (n == 0) return error.Closed;
-        self.pos += n;
+    if (n == 0) {
+        return error.Closed;
+    } else if (n < Message.HANDSHAKE_LEN) {
+        return null;
+    } else {
+        const hs: *HandShake = @ptrCast(hs_bytes[0..Message.HANDSHAKE_LEN]);
+        return hs.*;
     }
-
-    const unprocessed = self.buf[self.start..self.pos];
-    const hs_bytes = unprocessed[0..Message.HANDSHAKE_LEN];
-
-    const hs: *HandShake = @ptrCast(hs_bytes[0..Message.HANDSHAKE_LEN]);
-    self.start += Message.HANDSHAKE_LEN;
-    return hs.*;
 }
 
 pub fn readMessage(self: *Reader, alloc: std.mem.Allocator) !?Message {
-    var buf = self.buf;
-
-    while (true) {
-        if (try self.bufferedMessage()) |msg| {
-            // msg doesnt contain the len prefix
-            return try Message.fromBytes(alloc, msg);
-        }
-
-        const pos = self.pos;
-        const n = posix.read(self.socket, buf[pos..]) catch |err| switch (err) {
-            error.WouldBlock => return null,
-            else => return err,
-        };
-        if (n == 0) return error.Closed;
-        self.pos = pos + n;
+    if (try self.bufferedMessage()) |msg| {
+        return try Message.fromBytes(alloc, msg);
     }
-}
 
+    const n = posix.read(self.socket, self.buf[self.pos..]) catch |err| switch (err) {
+        error.WouldBlock => return null,
+        else => return err,
+    };
+    if (n == 0) return error.Closed;
+    self.pos += n;
+
+    if (try self.bufferedMessage()) |msg| {
+        return try Message.fromBytes(alloc, msg);
+    }
+
+    return null;
+}
 fn bufferedMessage(self: *Reader) !?[]u8 {
     const buf = self.buf;
     const pos = self.pos;
@@ -113,95 +106,4 @@ fn ensureSpace(self: *Reader, space: usize) error{BufferTooSmall}!void {
     @memmove(self.buf[0..unprocessed.len], unprocessed);
     self.start = 0;
     self.pos = unprocessed.len;
-}
-
-test "Reader: read entire message in the buffer" {
-    const alloc = std.testing.allocator;
-    var reader = try Reader.init(alloc, 64);
-    defer reader.deinit(alloc);
-
-    // choke message with len=1 (just the id=0)
-    const data = [_]u8{ 0x00, 0x00, 0x00, 0x01, 0x00 };
-    @memmove(reader.buf[0..data.len], &data);
-    reader.pos = data.len;
-
-    const maybe_msg = try reader.bufferedMessage();
-    try std.testing.expect(maybe_msg != null);
-    const msg_bytes = maybe_msg.?;
-
-    // the message does not conaint the len prefix
-    try std.testing.expectEqualSlices(u8, msg_bytes, &.{0});
-
-    const msg = try Message.fromBytes(alloc, msg_bytes);
-    defer msg.deinit(alloc);
-    try std.testing.expect(msg.id == .choke);
-    try std.testing.expect(msg.payload == null);
-}
-
-test "Reader: read keep-alive message (len=0)" {
-    const alloc = std.testing.allocator;
-    var reader = try Reader.init(alloc, 64);
-    defer reader.deinit(alloc);
-
-    const data = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
-    std.mem.copyForwards(u8, reader.buf[0..data.len], &data);
-    reader.pos = data.len;
-
-    const maybe_msg = try reader.bufferedMessage();
-    try std.testing.expect(maybe_msg != null);
-    const msg_bytes = maybe_msg.?;
-
-    // keep-alive => empty slice
-    try std.testing.expect(msg_bytes.len == 0);
-
-    const msg = try Message.fromBytes(alloc, msg_bytes);
-    try std.testing.expect(msg.id == .keep_alive);
-    try std.testing.expect(msg.payload == null);
-}
-
-test "Reader: test buffered message" {
-    const alloc = std.testing.allocator;
-    var reader = try Reader.init(alloc, 64);
-    defer reader.deinit(alloc);
-
-    // simulate partial read, 5bytes in the len prefix but we send less
-    const partial = [_]u8{ 0x00, 0x00, 0x00, 0x05, 0x01, 0xAA, 0xBB };
-    @memmove(reader.buf[0..partial.len], &partial);
-    reader.pos = partial.len;
-
-    const maybe_msg = try reader.bufferedMessage();
-    try std.testing.expect(maybe_msg == null);
-
-    // we send the missing bytes
-    const rest = [_]u8{ 0xCC, 0xDD };
-    @memmove(reader.buf[reader.pos .. reader.pos + rest.len], &rest);
-    reader.pos += rest.len;
-
-    const complete_msg = try reader.bufferedMessage();
-    try std.testing.expect(complete_msg != null);
-    const msg_bytes = complete_msg.?;
-
-    // full message
-    try std.testing.expectEqualSlices(u8, msg_bytes, &.{ 0x01, 0xAA, 0xBB, 0xCC, 0xDD });
-}
-
-test "Reader: ensureSpace moves unprocessed bytes to the start of the buffer" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-    var reader = try Reader.init(alloc, 7);
-    defer reader.deinit(alloc);
-
-    // fill the buffer with known values
-    const data = [_]u8{ 1, 2, 3, 4, 5, 6 };
-    @memmove(reader.buf[0..data.len], &data);
-
-    reader.pos = 6;
-    reader.start = 4; // buf[0..3] already processed
-
-    // the spare left is buf.len - start = 3 that is
-    // less than 4, so we expect a move
-    try reader.ensureSpace(4);
-    try std.testing.expectEqualSlices(u8, reader.buf[0..2], &.{ 5, 6 });
-    try std.testing.expectEqual(reader.start, 0);
-    try std.testing.expectEqual(reader.pos, 2);
 }

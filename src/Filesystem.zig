@@ -52,19 +52,21 @@
 
 const Self = @This();
 
-const IOMessage = struct {
-    status: enum(u8) {
-        /// The piece has been written to disk succesfully
-        store_success,
-        /// Tells it wants to write the downloaded piece to disk
-        request_store,
-        /// Used to comunicate to the filesystem thread to stop all activity
-        shutdown,
-        /// piece didnt pass the integrity check
-        integrity_failed,
-        /// other fs error
-        write_failed,
-    },
+pub const IOAction = enum {
+    /// The piece has been written to disk succesfully
+    store_success,
+    /// Tells it wants to write the downloaded piece to disk
+    request_store,
+    /// Used to comunicate to the filesystem thread to stop all activity
+    shutdown,
+    /// piece didnt pass the integrity check
+    integrity_failed,
+    /// other fs error
+    write_failed,
+};
+
+pub const IOMessage = struct {
+    status: IOAction,
     /// piece index
     index: u32,
     /// piece contents
