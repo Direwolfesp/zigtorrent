@@ -239,16 +239,18 @@ pub const PeerConnection = struct {
                     self.curr_piece = try self.piece_picker.pickPiece(self.peer_bitfield).?;
                     self.curr_piece_len = try self.torrent.calculatePieceSize(self.curr_piece);
                     self.requested = 0;
+
                     // realloc cuz this buffer might have been allocated before
-                    self.piece_buf = try alloc.realloc(u8, self.curr_piece_len);
+                    alloc.free(self.piece_buf);
+                    self.piece_buf = try alloc.alloc(u8, self.curr_piece_len.?);
                 }
 
                 // request pipeline
                 while (self.current_request_pipeline < self.target_request_pipeline and
-                    self.requested < self.curr_piece_len)
+                    self.requested < self.curr_piece_len.?)
                 {
-                    const block_size = @min(16 * 1024, self.current_piece_len - self.requested);
-                    try self.sendRequest(self.curr_piece, self.requested, block_size);
+                    const block_size = @min(16 * 1024, self.curr_piece_len.? - self.requested);
+                    try self.sendRequest(self.curr_piece.?, self.requested, block_size);
                     self.requested += block_size;
                     self.current_request_pipeline += 1;
                 }

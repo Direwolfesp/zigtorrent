@@ -110,11 +110,11 @@ pub fn deinit(self: *Self) void {
     self.submission_queue.deinit(self.alloc);
 
     for (self.files.items) |file_info| {
-        file_info.fd.close();
         std.posix.msync(file_info.mmap_file, std.posix.MSF.SYNC) catch |err| {
             log.err("Couldn't sync files to disk. Error: {t}", .{err});
         };
         std.posix.munmap(file_info.mmap_file);
+        file_info.fd.close();
     }
     self.files.deinit(self.alloc);
 }
