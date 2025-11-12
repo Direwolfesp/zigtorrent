@@ -30,7 +30,10 @@ pub const Session = struct {
         errdefer picker.deinit();
 
         // initialize rest of the modules
-        try fs_manager.ensureFsStructure();
+        fs_manager.ensureFsStructure() catch |err| {
+            log.err("{t}. Exiting.", .{err});
+            std.process.exit(1);
+        };
         try tracker.announce(alloc);
         const expected_peer_capacity = @min(128, tracker.peers.?.len);
 
@@ -60,10 +63,10 @@ pub const Session = struct {
         while (it.next()) |entry| {
             const peer = entry.value_ptr.*;
             self.epoll.removeClient(peer) catch |err| {
-                log.err("[{any}] Error while removing peer from eloop: {t} ", .{ peer.addr, err });
+                log.err("[{f}] Error while removing peer from eloop: {t} ", .{ peer.addr, err });
             };
             peer.deinit(self.alloc) catch |err| {
-                log.err("[{any}] Error while deinitializating peer: {t} ", .{ peer.addr, err });
+                log.err("[{f}] Error while deinitializating peer: {t} ", .{ peer.addr, err });
             };
         }
 
@@ -79,7 +82,7 @@ pub const Session = struct {
     /// Add a prepared peer (PeerConnection already created and connected).
     pub fn addPeer(self: *Self, peer: *PeerConnection) !void {
         const fd_key: u64 = @intCast(peer.socket);
-        _ = try self.peers.put(fd_key, peer);
+        _ = try self.peers.put(self.alloc, fd_key, peer);
         try self.epoll.newClient(peer);
     }
 
@@ -96,9 +99,87 @@ pub const Session = struct {
         };
     }
 
+    pub fn connectToPeers(self: *Self) !void {
+        const peer_list = self.tracker.peers orelse return error.NoPeersFound;
+        if (peer_list.len == 0) return error.NoPeersFound;
+
+        // epoll uses 128 max so its appropiate
+        const max_concurrent: usize = @intCast(@min(128, peer_list.len));
+        var tried: usize = 0;
+        var connected: usize = 0;
+
+        var start_index: usize = 0;
+        // random starting index
+        if (peer_list.len > 1)
+            start_index = @as(usize, @intCast(std.time.nanoTimestamp())) % peer_list.len;
+
+        // iterate peers and connect, wrap around if neeeded.
+        var i: usize = start_index;
+        while (tried < peer_list.len and connected < max_concurrent) : (i = (i + 1) % peer_list.len) {
+            const tracker_peer = peer_list[i];
+
+            var p = try self.alloc.create(PeerConnection);
+
+            const init_result = PeerConnection.init(
+                self.alloc,
+                .{ .in = tracker_peer },
+                self.torrent.getNumPieces(),
+                self,
+                16 * 1024,
+                16 * 1024,
+            ) catch |err| {
+                log.err("Error initializing peer with address {f}: {t}", .{ tracker_peer, err });
+                self.alloc.destroy(p);
+                tried += 1;
+                continue;
+            };
+            p.* = init_result;
+
+            // Attempt to connect
+            p.connect(&self.epoll) catch |err| {
+                log.err("[{f}] Connect error: {t}", .{ p.addr, err });
+
+                // deinit peer
+                p.deinit(self.alloc) catch |deinit_err| {
+                    log.err("[{f}] error deinit after connect failure: {t}", .{ tracker_peer.addr, deinit_err });
+                };
+                self.alloc.destroy(p);
+                tried += 1;
+                continue;
+            };
+
+            // add peer to eloop
+            self.addPeer(p) catch |err| {
+                log.err("Error while registering peer to event loop: {t}", .{err});
+
+                self.epoll.removeClient(p) catch |rem_err| {
+                    log.err("[{f}] removeClient failed during cleanup: {t}", .{ p.addr, rem_err });
+                    p.deinit(self.alloc) catch |deinit_err| {
+                        log.err("[{f}] deinit after map put failure: {t}", .{ p.addr, deinit_err });
+                    };
+                    self.alloc.destroy(p);
+                    tried += 1;
+                    continue;
+                };
+            };
+
+            // success:
+            connected += 1;
+            tried += 1;
+        }
+
+        log.info("tried to connect to {d} peers, connected {d}", .{ tried, connected });
+    }
+
     /// Main loop. This pumps epoll and the filesystem completion queue.
     /// It returns when stop() is called (sets stop_signal) or on fatal error.
     pub fn run(self: *Self) !void {
+        // try to spawn filesystem thread
+        const fs_thread = try std.Thread.spawn(.{}, Filesystem.processTask, .{&self.fs});
+        defer fs_thread.join();
+
+        try self.connectToPeers();
+
         self.running = true;
         const poll_timeout_ms = 100;
 

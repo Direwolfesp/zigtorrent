@@ -83,6 +83,7 @@ pub const PeerConnection = struct {
             .peer_bitfield = bitfield,
             .session = .{},
             .man = man,
+            .piece_buf = &.{},
         };
     }
 
@@ -139,7 +140,7 @@ pub const PeerConnection = struct {
                 switch (err) {
                     error.InvalidHandshake => {
                         log.err(
-                            "[{any}] Peer sent an invalid handshake, closing...",
+                            "[{f}] Peer sent an invalid handshake, closing...",
                             .{self.addr},
                         );
                         try self.deinit(alloc);
@@ -157,7 +158,7 @@ pub const PeerConnection = struct {
                             .bitfield => try self.parseBitfield(m),
                             .have => try self.parseHave(m),
                             else => log.err(
-                                "[{any}] Expected bitfield but found '{t}'",
+                                "[{f}] Expected bitfield but found '{t}'",
                                 .{ self.addr, m.id },
                             ),
                         }
@@ -166,7 +167,7 @@ pub const PeerConnection = struct {
                     }
                 } else |err| switch (err) {
                     error.Closed => log.warn(
-                        "[{any}] Peer closed the connection",
+                        "[{f}] Peer closed the connection",
                         .{self.addr},
                     ),
                     else => return err,
@@ -283,7 +284,7 @@ pub const PeerConnection = struct {
                             try self.loop.?.writeMode(self);
                         }
                     } else {
-                        log.err("[{any}] peer send block from piece {d}, while we requested piece {d}", .{
+                        log.err("[{f}] peer send block from piece {d}, while we requested piece {d}", .{
                             self.addr,
                             index,
                             self.curr_piece.?,
@@ -339,9 +340,6 @@ pub const PeerConnection = struct {
         self.writer.socket = sockfd;
         self.reader.socket = sockfd;
         self.session.state = .connected;
-        try self.loop.?.newClient(self); // OUT
-
-        std.debug.print("New client added {f}\n", .{self.addr});
     }
 
     pub fn init_handshake(self: *Self) !void {

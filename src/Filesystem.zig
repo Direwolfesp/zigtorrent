@@ -149,7 +149,9 @@ pub fn receive(self: *Self) ?IOMessage {
 /// - writing it to disk
 /// Once is done, push message to completion
 /// queue, otherwise mark it as incomplete.
-pub fn processTask(self: Self) void {
+pub fn processTask(self: *Self) !void {
+    log.info("Spawned filesystem main loop...", .{});
+
     while (true) {
         const task: *IOMessage = self.submission_queue.front() orelse {
             std.Thread.sleep(30 * std.time.ns_per_ms);
@@ -158,10 +160,12 @@ pub fn processTask(self: Self) void {
         self.submission_queue.pop();
         defer self.alloc.free(task.payload);
 
+        log.info("Processing task with id: {t}", .{task.status});
+
         switch (task.status) {
             .request_store => {
                 defer self.completion_queue.push(task.*);
-                if (!self.checkIntegrity(task)) {
+                if (!try self.checkIntegrity(task)) {
                     log.warn("Piece #{d} failed integrity check.", .{task.index});
                     task.status = .integrity_failed;
                     continue;
@@ -171,6 +175,7 @@ pub fn processTask(self: Self) void {
                     task.status = .write_failed;
                     continue;
                 };
+                log.info("Piece #{d} stored successfully", .{task.index});
                 task.status = .store_success;
             },
             .shutdown => break,
@@ -187,7 +192,7 @@ fn writePiece(self: Self, task: IOMessage) !void {
 
     // global byte offsets of the piece within the logical file
     const write_start: i64 = task.index * self.torr.info.piece_length;
-    const write_end: i64 = write_start + task.payload.len;
+    const write_end: i64 = write_start + @as(i64, @intCast(task.payload.len));
 
     var left = task.payload.len; // number of bytes to be written
     var file_start_offset: i64 = 0; // starting byte of the current file
@@ -202,9 +207,9 @@ fn writePiece(self: Self, task: IOMessage) !void {
         if (region_end <= region_start)
             continue;
 
-        const file_offset = region_start - file_start_offset;
-        const payload_start = region_start - write_start;
-        const payload_end = region_end - write_start;
+        const file_offset: usize = @intCast(region_start - file_start_offset);
+        const payload_start: usize = @intCast(region_start - write_start);
+        const payload_end: usize = @intCast(region_end - write_start);
 
         @memcpy(
             file.mmap_file[file_offset .. file_offset + (payload_end - payload_start)],
@@ -219,8 +224,9 @@ fn writePiece(self: Self, task: IOMessage) !void {
 }
 
 /// Calculates SHA1 on the piece payload
-fn checkIntegrity(self: *Self, task: *const IOMessage) bool {
-    std.debug.assert(self.torr.calculatePieceSize(task.index) == task.payload.len);
+fn checkIntegrity(self: *Self, task: *const IOMessage) !bool {
+    const piece_size: usize = @intCast(try self.torr.calculatePieceSize(@intCast(task.index)));
+    std.debug.assert(piece_size == task.payload.len);
     std.debug.assert(task.status == .request_store);
     var result: [Sha1.digest_length]u8 = undefined;
     Sha1.hash(task.payload, &result, .{});
