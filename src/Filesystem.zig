@@ -122,20 +122,20 @@ pub fn deinit(self: *Self) void {
 }
 
 /// Add a message to the queue. Blocks if full
-pub fn submit(self: *Self, task: IOMessage) void {
+pub fn submit(self: *Self, task: IOMessage) !void {
     std.debug.assert(task.payload.len <= self.torr.info.piece_length);
     // NOTE: for now, i will just clone the payload so the filesystem thread has
     // its own copy.
     self.submission_queue.push(.{
         .status = task.status,
         .index = task.index,
-        .payload = try self.alloc.dupe(task.payload),
+        .payload = try self.alloc.dupe(u8, task.payload),
         .sender = task.sender,
     });
 }
 
 // Pop from completion queue, null if empty
-pub fn receive(self: Self) ?IOMessage {
+pub fn receive(self: *Self) ?IOMessage {
     if (self.completion_queue.front()) |ret| {
         defer self.completion_queue.pop();
         return ret.*;

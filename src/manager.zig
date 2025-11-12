@@ -59,8 +59,12 @@ pub const Session = struct {
         var it = self.peers.iterator();
         while (it.next()) |entry| {
             const peer = entry.value_ptr.*;
-            _ = self.epoll.removeClient(peer);
-            peer.deinit(self.alloc) catch {};
+            self.epoll.removeClient(peer) catch |err| {
+                log.err("[{any}] Error while removing peer from eloop: {t} ", .{ peer.addr, err });
+            };
+            peer.deinit(self.alloc) catch |err| {
+                log.err("[{any}] Error while deinitializating peer: {t} ", .{ peer.addr, err });
+            };
         }
 
         self.peers.deinit(self.alloc);
@@ -118,7 +122,7 @@ pub const Session = struct {
                         continue;
                     };
                 }
-                if ((r.events & linux.EPOLLOUT) != 0) {
+                if ((r.events & linux.EPOLL.OUT) != 0) {
                     peer.handle_write(self.alloc) catch |err| {
                         log.err("peer.handle_write error: {t}", .{err});
                         _ = try self.removePeer(peer);

@@ -100,9 +100,9 @@ pub const PeerConnection = struct {
             std.posix.close(self.socket);
     }
 
-    pub fn parseBitfield(self: *Self, bitfield: Message) void {
+    pub fn parseBitfield(self: *Self, bitfield: Message) !void {
         std.debug.assert(bitfield.id == .bitfield);
-        var index = 0;
+        var index: u32 = 0;
         for (bitfield.payload.?) |bf_byte| {
             var mask: u8 = 0b1000_0000;
             for (0..8) |_| {
@@ -117,7 +117,7 @@ pub const PeerConnection = struct {
         try self.loop.?.writeMode(self); // we want to write interested
     }
 
-    pub fn parseHave(self: *Self, have: Message) void {
+    pub fn parseHave(self: *Self, have: Message) !void {
         std.debug.assert(have.id == .have);
         const piece: u32 = std.mem.readInt(u32, have.payload.?[0..4], .little);
         self.peer_bitfield.set(piece);
@@ -154,15 +154,15 @@ pub const PeerConnection = struct {
                         defer m.deinit(alloc);
 
                         switch (m.id) {
-                            .bitfield => self.parseBitfield(m),
-                            .have => self.parseHave(m),
+                            .bitfield => try self.parseBitfield(m),
+                            .have => try self.parseHave(m),
                             else => log.err(
                                 "[{any}] Expected bitfield but found '{t}'",
                                 .{ self.addr, m.id },
                             ),
                         }
                         // register pieces
-                        self.man.picker.register_peer_pieces(self.peer_bitfield);
+                        try self.man.picker.register_peer_pieces(self.peer_bitfield);
                     }
                 } else |err| switch (err) {
                     error.Closed => log.warn(
@@ -214,13 +214,12 @@ pub const PeerConnection = struct {
             else if (self.session.is_interested and !self.session.is_choked) {
                 // if we are not downloading a piece, ask the picker one to download
                 if (self.curr_piece == null) {
-                    self.curr_piece = try self.man.picker.pickPiece(self.peer_bitfield).?;
-                    self.curr_piece_len = try self.man.torrent.calculatePieceSize(self.curr_piece);
+                    self.curr_piece = (try self.man.picker.pickPiece(self.peer_bitfield)).?;
+                    self.curr_piece_len = @intCast(try self.man.torrent.calculatePieceSize(self.curr_piece.?));
                     self.requested = 0;
                     // NOTE: realloc the previous piece with the new size, the
                     // filesystem will still keep a copy of the previous one
-                    try alloc.realloc(self.piece_buf, self.curr_piece_len);
-                    self.piece_buf = try alloc.alloc(u8, self.curr_piece_len.?);
+                    self.piece_buf = try alloc.realloc(self.piece_buf, @intCast(self.curr_piece_len.?));
                 }
 
                 // request pipeline
@@ -233,9 +232,9 @@ pub const PeerConnection = struct {
                     self.current_request_pipeline += 1;
                 }
                 // wait for piece
-                self.loop.?.readMode(self);
+                try self.loop.?.readMode(self);
             }
-        } else if (type == .READ) {
+        } else if (event == .READ) {
             // wait for unchoke
             if (self.session.is_interested and self.session.is_choked) {
                 const message = try self.reader.readMessage(alloc);
@@ -244,7 +243,7 @@ pub const PeerConnection = struct {
                     if (msg.id == .unchoke) {
                         // we can start requesting blocks
                         self.session.is_choked = false;
-                        self.loop.?.writeMode(self);
+                        try self.loop.?.writeMode(self);
                     }
                 }
             }
@@ -268,10 +267,10 @@ pub const PeerConnection = struct {
                         // we downloaded a piece
                         if (self.downloaded == self.curr_piece_len) {
                             // submit store and hash request to filesystem thread
-                            self.disk_io.submit(.{
+                            try self.man.fs.submit(.{
                                 .sender = self,
                                 .status = .request_store,
-                                .index = self.curr_piece,
+                                .index = @intCast(self.curr_piece.?),
                                 .payload = self.piece_buf,
                             });
 
@@ -281,13 +280,13 @@ pub const PeerConnection = struct {
                             self.curr_piece_len = null;
 
                             // we want to write requests now
-                            self.loop.?.writeMode(self);
+                            try self.loop.?.writeMode(self);
                         }
                     } else {
                         log.err("[{any}] peer send block from piece {d}, while we requested piece {d}", .{
                             self.addr,
                             index,
-                            self.curr_piece,
+                            self.curr_piece.?,
                         });
                     }
                 }
@@ -361,7 +360,7 @@ pub const PeerConnection = struct {
         }
 
         self.session.state = .sending_handshake;
-        const written = try self.writer.writeHandshake(self.man.peer_id, self.man.torrent);
+        const written = try self.writer.writeHandshake(self.man.peer_id, &self.man.torrent);
 
         // if we didnt manage to write the handshake keep writing
         if (!written) {

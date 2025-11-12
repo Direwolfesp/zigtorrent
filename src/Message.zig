@@ -6,8 +6,7 @@ const log = std.log.scoped(.Message);
 /// Contains the different message IDs of the protocol.
 /// KeepAlive is not considered an ID but is here for convenience.
 /// Order matters.
-const Type = enum(i8) {
-    keep_alive = -1,
+const Type = enum(u8) {
     choke = 0,
     unchoke = 1,
     interested = 2,
@@ -17,6 +16,7 @@ const Type = enum(i8) {
     request = 6,
     piece = 7,
     cancel = 8,
+    keep_alive = 9,
 };
 
 const Self = @This();
@@ -67,15 +67,9 @@ pub fn fromBytes(alloc: std.mem.Allocator, bytes: []const u8) !Self {
     }
 
     const id = std.enums.fromInt(Type, bytes[0]) orelse return Error.InvalidMessageId;
-    const payload = if (bytes.len > 1)
-        try alloc.dupe(u8, bytes[1..])
-    else
-        null;
+    const payload = if (bytes.len > 1) try alloc.dupe(u8, bytes[1..]) else null;
 
-    return .{
-        .id = id,
-        .payload = payload,
-    };
+    return .{ .id = id, .payload = payload };
 }
 
 test "message: read keep alive" {

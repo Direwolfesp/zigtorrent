@@ -99,7 +99,7 @@ pub fn deinit(self: *Self) void {
 }
 
 /// Finding a rare piece for a peer:
-pub fn pickPiece(self: *const Self, have: std.DynamicBitSet) !?u32 {
+pub fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
     for (self.pieces.items, 0..) |p, i| {
         // if the piece is in `pieces`, the index of the piece must match the one
         // from `piece_map`
@@ -113,11 +113,11 @@ pub fn pickPiece(self: *const Self, have: std.DynamicBitSet) !?u32 {
             // we pick as requested, to avoid picking them again.
             if (self.downloading.get(p) == null) {
                 const num_blocks = try self.torrent.calculateNumBlocks(p);
-                var block_state: std.ArrayList(BlockState) = try .initCapacity(self.alloc, num_blocks);
-                block_state.appendNTimesAssumeCapacity(.pending, num_blocks);
+                var block_state: std.ArrayList(BlockState) = try .initCapacity(self.alloc, @intCast(num_blocks));
+                block_state.appendNTimesAssumeCapacity(.pending, @intCast(num_blocks));
 
                 try self.downloading.put(p, DownloadingPiece{
-                    .index = i,
+                    .index = @intCast(i),
                     .block_state = block_state,
                 });
                 self.piece_map.items[p].state = true;
@@ -194,10 +194,10 @@ pub fn updateAllBlockStates(self: *Self, piece: u32, new_state: BlockState) void
 }
 
 // For each set bit in bitfield, increment piece availabity
-pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
+pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
-        self.inc_piece_refcount(piece_index);
+        try self.inc_piece_refcount(@intCast(piece_index));
     }
 }
 
@@ -222,7 +222,7 @@ pub fn inc_piece_refcount(self: *Self, piece: u32) !void {
     // we want to ensure a bucket exists
     while (self.priority_boundaries.items.len <= new_avail + 1) {
         const last = boundaries[boundaries.len - 1];
-        try self.priority_boundaries.append(last);
+        try self.priority_boundaries.append(self.alloc, last);
         boundaries = self.priority_boundaries.items;
     }
 

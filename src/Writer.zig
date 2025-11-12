@@ -49,7 +49,7 @@ const Error = error{
     BufferTooSmall,
     PendingMessage,
     Closed,
-};
+} || std.posix.WriteError;
 
 /// `msg` doesn't include the len prefix
 /// Returns false if it didn't manage to write all the buffer,
@@ -60,11 +60,14 @@ pub fn writeMessage(self: *Self, msg: Message) Error!bool {
     }
 
     // id + body
-    const total_len: u32 = 1 + if (msg.payload) |p| p.len else 0;
+    const total_len: u32 = 1 + if (msg.payload) |p| @as(u32, @intCast(p.len)) else 0;
     if (total_len + 4 > self.write_buf.len) return Error.BufferTooSmall;
 
     std.mem.writeInt(u32, self.write_buf[0..4], total_len, .big);
-    self.write_buf[4] = @intFromEnum(msg.id);
+
+    if (msg.id != .keep_alive) {
+        self.write_buf[4] = @intFromEnum(msg.id);
+    }
 
     if (msg.payload) |p| {
         @memmove(self.write_buf[5 .. 5 + p.len], p);
@@ -77,7 +80,7 @@ pub fn writeMessage(self: *Self, msg: Message) Error!bool {
 /// dumps `to_write` into the socket
 /// Returns false if it didn't manage to write all the buffer,
 /// true if otherwise.
-pub fn flush(self: *Self) !bool {
+pub fn flush(self: *Self) Error!bool {
     const n = std.posix.write(self.socket, self.to_write) catch |err|
         return switch (err) {
             error.WouldBlock => false,
