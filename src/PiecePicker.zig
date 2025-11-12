@@ -205,7 +205,7 @@ pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSet) void {
 pub fn unregister_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
-        self.dec_piece_refcount(piece_index);
+        self.dec_piece_refcount(@intCast(piece_index));
     }
 }
 

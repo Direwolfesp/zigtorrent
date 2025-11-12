@@ -106,7 +106,7 @@ pub const PeerConnection = struct {
         for (bitfield.payload.?) |bf_byte| {
             var mask: u8 = 0b1000_0000;
             for (0..8) |_| {
-                if (mask & bf_byte != 0 and index < self.torrent.getNumPieces()) {
+                if (mask & bf_byte != 0 and index < self.man.torrent.getNumPieces()) {
                     self.peer_bitfield.set(index);
                 }
                 mask >>= 1;
@@ -132,7 +132,10 @@ pub const PeerConnection = struct {
             .disconnected => {},
             .connecting => {},
             .connected => {},
-            .waiting_handshake => self.recv_handshake(self.peer_id, self.torrent) catch |err|
+            .waiting_handshake => self.recv_handshake(
+                self.man.peer_id,
+                self.man.torrent,
+            ) catch |err|
                 switch (err) {
                     error.InvalidHandshake => {
                         log.err(
@@ -212,7 +215,7 @@ pub const PeerConnection = struct {
                 // if we are not downloading a piece, ask the picker one to download
                 if (self.curr_piece == null) {
                     self.curr_piece = try self.piece_picker.pickPiece(self.peer_bitfield).?;
-                    self.curr_piece_len = try self.torrent.calculatePieceSize(self.curr_piece);
+                    self.curr_piece_len = try self.man.torrent.calculatePieceSize(self.curr_piece);
                     self.requested = 0;
                     // NOTE: realloc the previous piece with the new size, the
                     // filesystem will still keep a copy of the previous one
@@ -358,7 +361,7 @@ pub const PeerConnection = struct {
         }
 
         self.session.state = .sending_handshake;
-        const written = try self.writer.writeHandshake(self.peer_id, self.torrent);
+        const written = try self.writer.writeHandshake(self.man.peer_id, self.man.torrent);
 
         // if we didnt manage to write the handshake keep writing
         if (!written) {
