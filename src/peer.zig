@@ -383,12 +383,17 @@ pub const PeerConnection = struct {
         if (handshake) |hs| {
             if (hs.pstrlen != 19 or
                 !std.mem.eql(u8, &hs.pstr, "BitTorrent protocol") or
-                !std.mem.eql(u8, &hs.info_hash, &torrent.info_hash) or
-                !std.mem.eql(u8, &hs.peer_id, &peer_id))
+                !std.mem.eql(u8, &hs.info_hash, &torrent.info_hash))
             {
-                log.err("Invalid handshake from peer {f}", .{self.addr});
+                log.warn("Invalid handshake from peer {f}, wrong protocol or info hash", .{self.addr});
                 return error.InvalidHandshake;
             }
+
+            if (std.mem.eql(u8, &peer_id, &hs.peer_id)) {
+                log.warn("Invalid handshake from peer {f}, peer sent our same id.", .{self.addr});
+                return error.InvalidHandshake;
+            }
+
             log.debug("Handshake received successfully, going to read mode", .{});
             self.session.state = .waiting_availability;
             try self.loop.?.readMode(self);
