@@ -1,14 +1,23 @@
 pub const Session = struct {
     alloc: std.mem.Allocator,
+
     peer_id: [20]u8,
+
     torrent: TorrentFile,
+
     tracker: Tracker,
+
     fs: Filesystem,
+
     picker: PiecePicker,
 
     epoll: Epoll,
+
+    // socketfd -> *Peer
     peers: std.AutoHashMapUnmanaged(u64, *PeerConnection),
+
     running: bool,
+
     stop_signal: std.atomic.Value(bool),
 
     const Self = @This();
@@ -26,7 +35,7 @@ pub const Session = struct {
         var fs_manager = try Filesystem.init(alloc, &torrent.meta, 1024);
         errdefer fs_manager.deinit();
 
-        var picker = try PiecePicker.init(torrent.meta, alloc);
+        var picker = try PiecePicker.init(&torrent.meta, alloc);
         errdefer picker.deinit();
 
         // initialize rest of the modules
@@ -202,8 +211,7 @@ pub const Session = struct {
                         _ = try self.removePeer(peer);
                         continue;
                     };
-                }
-                if ((r.events & linux.EPOLL.OUT) != 0) {
+                } else if ((r.events & linux.EPOLL.OUT) != 0) {
                     peer.handle_write(self.alloc) catch |err| {
                         log.err("peer.handle_write error: {t}", .{err});
                         _ = try self.removePeer(peer);

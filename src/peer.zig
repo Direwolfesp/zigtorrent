@@ -36,13 +36,7 @@ pub const PeerConnection = struct {
     peer_bitfield: std.DynamicBitSetUnmanaged,
     session: ConnectionStatus = .{},
 
-    // this fields might be encapsulated in a higher entity
-    // later and pass it as a pointer, because they are common
-    // for all peers
-    // torrent: *const TorrentFile,
-    // piece_picker: *PiecePicker,
-    // disk_io: *Filesystem,
-    // peer_id: [20]u8,
+    // parent entity
     man: *manager.Session,
 
     // fields related to the current download state
@@ -127,7 +121,6 @@ pub const PeerConnection = struct {
         try self.loop.?.writeMode(self); // we want to write interested
     }
 
-    // TODO:
     pub fn handle_read(self: *Self, alloc: std.mem.Allocator) !void {
         switch (self.session.state) {
             .disconnected => {},
@@ -162,22 +155,20 @@ pub const PeerConnection = struct {
                                 .{ self.addr, m.id },
                             ),
                         }
-                        // register pieces
+                        log.info("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
                         try self.man.picker.register_peer_pieces(self.peer_bitfield);
                     }
-                } else |err| switch (err) {
-                    error.Closed => log.warn(
-                        "[{f}] Peer closed the connection",
-                        .{self.addr},
-                    ),
-                    else => return err,
+                } else |err| {
+                    log.warn("[{f}] Error while waiting availability: {t}", .{
+                        self.addr,
+                        err,
+                    });
                 }
             },
             .normal => try self.handleNormal(alloc, .READ),
         }
     }
 
-    // TODO:
     pub fn handle_write(self: *Self, alloc: std.mem.Allocator) !void {
         switch (self.session.state) {
             .disconnected => {},
@@ -190,12 +181,6 @@ pub const PeerConnection = struct {
         }
     }
 
-    // FIXME: maybe I should:
-    // - create more SessionState fields, for each possible state like
-    //   waiting_unchoke, etc...
-    // and/or
-    // - pass to each handler function like handleNormal() and aditional
-    //   parameter like .READ, .WRITE so it has more context of the caller
     pub fn handleNormal(self: *Self, alloc: std.mem.Allocator, event: EventType) !void {
         if (event == .WRITE) {
             // write interested
@@ -394,9 +379,29 @@ pub const PeerConnection = struct {
                 return error.InvalidHandshake;
             }
 
-            log.debug("Handshake received successfully, going to read mode", .{});
-            self.session.state = .waiting_availability;
-            try self.loop.?.readMode(self);
+            log.debug("handshaked with peer {f}", .{self.addr});
+
+            const n_bytes: usize = self.man.torrent.getNumPieces() + 7 / 8;
+            const empty_bytes = try self.man.alloc.alloc(u8, n_bytes);
+            defer self.man.alloc.free(empty_bytes);
+
+            // we try to start by sending out bitfield
+            const written_bt = try self.writer.writeMessage(.{
+                .id = .bitfield,
+                .payload = empty_bytes,
+            });
+
+            //
+            if (written_bt) {
+                try self.loop.?.readMode(self);
+                log.debug("[{f}] Bitfield sent successfully, going to read mode", .{self.addr});
+                self.session.state = .waiting_availability;
+                try self.loop.?.readMode(self);
+            } else {
+                log.debug("[{f}] bitfiled not sent completely", .{self.addr});
+                try self.loop.?.writeMode(self);
+            }
+
             return;
         } else {
             // Not enough bytes yet to form a full handshake. Caller should wait

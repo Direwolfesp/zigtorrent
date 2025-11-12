@@ -50,8 +50,9 @@ priority_boundaries: std.ArrayList(u32),
 /// Stores information about each currently downloading piece. The key is the piece index.
 downloading: std.AutoHashMap(u32, DownloadingPiece),
 
-pub fn init(torrent: TorrentFile, alloc: std.mem.Allocator) !Self {
+pub fn init(torrent: *const TorrentFile, alloc: std.mem.Allocator) !Self {
     const num_pieces = torrent.getNumPieces();
+    std.debug.assert(num_pieces != 0);
 
     var piece_map: std.ArrayList(PiecePos) = try .initCapacity(alloc, num_pieces);
     errdefer piece_map.deinit(alloc);
@@ -83,7 +84,7 @@ pub fn init(torrent: TorrentFile, alloc: std.mem.Allocator) !Self {
         .pieces = pieces,
         .piece_map = piece_map,
         .alloc = alloc,
-        .torrent = &torrent,
+        .torrent = torrent,
     };
 }
 
@@ -197,6 +198,7 @@ pub fn updateAllBlockStates(self: *Self, piece: u32, new_state: BlockState) void
 pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
+        std.debug.assert(piece_index >= 0 and piece_index < self.torrent.getNumPieces());
         try self.inc_piece_refcount(@intCast(piece_index));
     }
 }
@@ -205,6 +207,7 @@ pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !
 pub fn unregister_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
+        std.debug.assert(piece_index >= 0 and piece_index < self.torrent.getNumPieces());
         self.dec_piece_refcount(@intCast(piece_index));
     }
 }
