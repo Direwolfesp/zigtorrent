@@ -71,6 +71,8 @@ pub const IOMessage = struct {
     index: u32,
     /// piece contents
     payload: []const u8,
+    /// client who submitted this message
+    sender: *PeerConnection,
 };
 
 const FileInfo = struct {
@@ -122,7 +124,14 @@ pub fn deinit(self: *Self) void {
 /// Add a message to the queue. Blocks if full
 pub fn submit(self: *Self, task: IOMessage) void {
     std.debug.assert(task.payload.len <= self.torr.info.piece_length);
-    self.submission_queue.push(task);
+    // NOTE: for now, i will just clone the payload so the filesystem thread has
+    // its own copy.
+    self.submission_queue.push(.{
+        .status = task.status,
+        .index = task.index,
+        .payload = try self.alloc.dupe(task.payload),
+        .sender = task.sender,
+    });
 }
 
 // Pop from completion queue, null if empty
@@ -147,6 +156,7 @@ pub fn processTask(self: Self) void {
             continue;
         };
         self.submission_queue.pop();
+        defer self.alloc.free(task.payload);
 
         switch (task.status) {
             .request_store => {
@@ -361,4 +371,5 @@ const testing = std.testing;
 
 const spsc = @import("spsc_queue");
 const TorrentFile = @import("TorrentFile.zig");
+const PeerConnection = @import("peer.zig").PeerConnection;
 const MessageQueue = spsc.SpscQueueUnmanaged(IOMessage, false);

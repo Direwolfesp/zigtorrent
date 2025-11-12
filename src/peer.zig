@@ -23,20 +23,6 @@ const SessionState = enum {
 };
 
 pub const ConnectionStatus = struct {
-    /// we are waiting for disk_io to finish hashing.
-    /// TODO: Dont block the current peer, just pick another block and watch
-    /// out for previous disk_io piece results. To achieve that, all on-fly
-    /// piece buffers must be keept until the piece is hashed, then we can
-    /// free them on demand. Maybe: `hashMap(u32, []u8)` that maps piece_index
-    /// -> piece_buffer.
-    /// FIXME: the `IOMessages` are received out of order, so the main loop
-    /// that received the `IOMessages`, must identify the `PeerConnection`
-    /// who sent it in the first place, we could just attach another field
-    /// to `IOMessage` like `client: *PeerConnection`, and call back the
-    /// `PeerConnection` like `p.onIOMessage(.store_success)` so the peer can:
-    /// free the buffer for that piece, notify the `piece_picker` about the
-    /// piece status (download correctly, inttegrity failed, etc...)
-    is_pending: bool = false,
     is_choked: bool = true,
     is_interested: bool = false,
     in_endgame: bool = false,
@@ -53,11 +39,11 @@ pub const PeerConnection = struct {
     // this fields might be encapsulated in a higher entity
     // later and pass it as a pointer, because they are common
     // for all peers
-    peer_id: [20]u8,
-    torrent: *const TorrentFile,
-    piece_picker: *PiecePicker,
-    disk_io: *Filesystem,
-    //
+    // torrent: *const TorrentFile,
+    // piece_picker: *PiecePicker,
+    // disk_io: *Filesystem,
+    // peer_id: [20]u8,
+    man: *manager.Session,
 
     // fields related to the current download state
     piece_buf: []u8,
@@ -77,12 +63,7 @@ pub const PeerConnection = struct {
         alloc: std.mem.Allocator,
         addr: std.net.Address,
         num_pieces: usize,
-        //
-        peer_id: [20]u8,
-        torrent: *const TorrentFile,
-        piece_picker: *PiecePicker,
-        disk_io: Filesystem,
-        //
+        man: *manager.Session,
         write_buf_len: usize,
         read_buf_len: usize,
     ) !Self {
@@ -101,20 +82,19 @@ pub const PeerConnection = struct {
             .reader = reader,
             .peer_bitfield = bitfield,
             .session = .{},
-            .peer_id = peer_id,
-            .torrent = torrent,
-            .piece_picker = piece_picker,
-            .disk_io = disk_io,
+            .man = man,
         };
     }
 
     pub fn deinit(self: *Self, alloc: std.mem.Allocator) !void {
         self.reader.deinit(alloc);
         self.writer.deinit(alloc);
+
+        self.man.picker.unregister_peer_pieces(self.peer_bitfield);
         self.peer_bitfield.deinit(alloc);
 
-        if (self.loop) |l|
-            try l.removeClient(self);
+        // if (self.loop) |l|
+        //     try l.removeClient(self);
 
         if (self.socket != -1)
             std.posix.close(self.socket);
@@ -213,11 +193,6 @@ pub const PeerConnection = struct {
     // - pass to each handler function like handleNormal() and aditional
     //   parameter like .READ, .WRITE so it has more context of the caller
     pub fn handleNormal(self: *Self, alloc: std.mem.Allocator, event: EventType) !void {
-        // for now, if this peer for a disk request, just wait
-        if (self.session.is_pending) {
-            return;
-        }
-
         if (event == .WRITE) {
             // write interested
             if (!self.session.is_interested and self.session.is_choked) {
@@ -239,9 +214,9 @@ pub const PeerConnection = struct {
                     self.curr_piece = try self.piece_picker.pickPiece(self.peer_bitfield).?;
                     self.curr_piece_len = try self.torrent.calculatePieceSize(self.curr_piece);
                     self.requested = 0;
-
-                    // realloc cuz this buffer might have been allocated before
-                    alloc.free(self.piece_buf);
+                    // NOTE: realloc the previous piece with the new size, the
+                    // filesystem will still keep a copy of the previous one
+                    try alloc.realloc(self.piece_buf, self.curr_piece_len);
                     self.piece_buf = try alloc.alloc(u8, self.curr_piece_len.?);
                 }
 
@@ -291,17 +266,16 @@ pub const PeerConnection = struct {
                         if (self.downloaded == self.curr_piece_len) {
                             // submit store and hash request to filesystem thread
                             self.disk_io.submit(.{
+                                .sender = self,
                                 .status = .request_store,
                                 .index = self.curr_piece,
                                 .payload = self.piece_buf,
                             });
 
-                            // TODO: fix the IOMessage stuff
                             self.requested = 0;
                             self.downloaded = 0;
                             self.curr_piece = null;
                             self.curr_piece_len = null;
-                            self.session.is_pending = true;
 
                             // we want to write requests now
                             self.loop.?.writeMode(self);
@@ -318,10 +292,18 @@ pub const PeerConnection = struct {
         }
     }
 
-    pub fn onIOMessage(self: *Self, io_message: Filesystem.IOAction) void {
-        _ = self;
-        _ = io_message;
-        @panic("TODO: read FIXME on top.");
+    /// callback to handle the io_message from the completion queue.
+    pub fn onIOMessage(self: *Self, io_message: Filesystem.IOMessage) void {
+        switch (io_message.status) {
+            .store_success => {
+                self.man.picker.updateAllBlockStates(io_message.index, .finished);
+                self.man.picker.markPieceCompleted(io_message.index);
+            },
+            .integrity_failed, .write_failed => {
+                self.man.picker.updateAllBlockStates(io_message.index, .pending);
+            },
+            else => {},
+        }
     }
 
     pub fn sendRequest(self: *Self, index: u32, begin: u32, length: u32) !void {
@@ -341,19 +323,14 @@ pub const PeerConnection = struct {
 
         // connect non-blocking
         self.session.state = .connecting;
-        while (true) {
-            std.posix.connect(
-                sockfd,
-                &self.addr.any,
-                self.addr.getOsSockLen(),
-            ) catch |err| switch (err) {
-                error.WouldBlock => {
-                    std.Thread.sleep(100 * std.time.ns_per_ms);
-                    break;
-                },
-                else => return err,
-            };
-        }
+        std.posix.connect(
+            sockfd,
+            &self.addr.any,
+            self.addr.getOsSockLen(),
+        ) catch |err| switch (err) {
+            error.WouldBlock => {},
+            else => return err,
+        };
 
         self.socket = sockfd;
         self.loop = loop;
@@ -437,3 +414,4 @@ const TorrentFile = @import("TorrentFile.zig");
 const Filesystem = @import("Filesystem.zig");
 const Tracker = @import("Tracker.zig");
 const Writer = @import("Writer.zig");
+const manager = @import("manager.zig");

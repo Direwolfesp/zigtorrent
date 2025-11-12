@@ -28,28 +28,11 @@ pub fn main() !void {
         }
     };
 
-    var timer = try std.time.Timer.start();
-    var torrent = try TorrentFile.open(alloc, filename);
-    defer torrent.deinit(alloc);
-    const parse_torrent_time = timer.lap();
+    var session: manager.Session = try .init(alloc, filename);
+    defer session.deinit();
 
-    var tracker = try Tracker.init(&torrent.meta);
-    defer tracker.deinit(alloc);
-    timer.reset();
-    try tracker.announce(alloc);
-    const get_peers_timer = timer.lap();
+    try session.run();
 
-    var fs_manager = try Filesystem.init(alloc, &torrent.meta, 1024);
-    defer fs_manager.deinit();
-
-    fs_manager.ensureFsStructure() catch |err| {
-        log.err("Could not create torrent structure in de filesystem: {t}", .{err});
-    };
-
-    log.debug("Parsed torrent in {D}", .{parse_torrent_time});
-    log.debug("Got peers from tracker in {D}", .{get_peers_timer});
-
-    try tracker.printState(stdout);
     try stdout.flush();
 }
 
@@ -71,3 +54,4 @@ const Message = @import("Message.zig");
 const TorrentFile = @import("TorrentFile.zig");
 const Tracker = @import("Tracker.zig");
 const Filesystem = @import("Filesystem.zig");
+const manager = @import("manager.zig");

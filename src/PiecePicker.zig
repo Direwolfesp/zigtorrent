@@ -27,13 +27,11 @@ const DownloadingPiece = struct {
     block_state: std.ArrayList(BlockState),
 };
 
-const BlockState = enum(u8) {
+pub const BlockState = enum(u8) {
     /// block needs to be requested
     pending,
     /// block has been requested from the peer
     requested,
-    /// block has been received but needs verification
-    scratch,
     /// block already verified and written to disk
     finished,
 };
@@ -186,6 +184,15 @@ pub fn updateBlockState(self: *Self, piece: u32, block: i64, state: BlockState) 
     }
 }
 
+/// Updates all the BlockState for the given `piece`.
+pub fn updateAllBlockStates(self: *Self, piece: u32, new_state: BlockState) void {
+    if (self.downloading.get(piece)) |p| {
+        for (p.block_state.items) |*block| {
+            block.* = new_state;
+        }
+    }
+}
+
 // For each set bit in bitfield, increment piece availabity
 pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSet) void {
     var iter = bitfield.iterator(.{ .kind = .set });
@@ -195,7 +202,7 @@ pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSet) void {
 }
 
 // For each set bit in bitfield, decrement piece availabity
-pub fn unregister_peer_pieces(self: *Self, bitfield: std.DynamicBitSet) void {
+pub fn unregister_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
         self.dec_piece_refcount(piece_index);
