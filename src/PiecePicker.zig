@@ -194,7 +194,7 @@ pub fn updateAllBlockStates(self: *Self, piece: u32, new_state: BlockState) void
 }
 
 // For each set bit in bitfield, increment piece availabity
-pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSet) void {
+pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
         self.inc_piece_refcount(piece_index);

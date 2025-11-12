@@ -119,9 +119,9 @@ pub const PeerConnection = struct {
 
     pub fn parseHave(self: *Self, have: Message) void {
         std.debug.assert(have.id == .have);
-        const piece: u32 = std.mem.readInt(u32, have.payload[0..4], .little);
+        const piece: u32 = std.mem.readInt(u32, have.payload.?[0..4], .little);
         self.peer_bitfield.set(piece);
-        try self.piece_picker.inc_piece_refcount(piece);
+        try self.man.picker.inc_piece_refcount(piece);
         self.session.state = .normal;
         try self.loop.?.writeMode(self); // we want to write interested
     }
@@ -134,7 +134,7 @@ pub const PeerConnection = struct {
             .connected => {},
             .waiting_handshake => self.recv_handshake(
                 self.man.peer_id,
-                self.man.torrent,
+                &self.man.torrent,
             ) catch |err|
                 switch (err) {
                     error.InvalidHandshake => {
@@ -162,7 +162,7 @@ pub const PeerConnection = struct {
                             ),
                         }
                         // register pieces
-                        self.piece_picker.register_peer_pieces(self.peer_bitfield);
+                        self.man.picker.register_peer_pieces(self.peer_bitfield);
                     }
                 } else |err| switch (err) {
                     error.Closed => log.warn(
@@ -214,7 +214,7 @@ pub const PeerConnection = struct {
             else if (self.session.is_interested and !self.session.is_choked) {
                 // if we are not downloading a piece, ask the picker one to download
                 if (self.curr_piece == null) {
-                    self.curr_piece = try self.piece_picker.pickPiece(self.peer_bitfield).?;
+                    self.curr_piece = try self.man.picker.pickPiece(self.peer_bitfield).?;
                     self.curr_piece_len = try self.man.torrent.calculatePieceSize(self.curr_piece);
                     self.requested = 0;
                     // NOTE: realloc the previous piece with the new size, the

@@ -30,7 +30,7 @@ pub fn deinit(self: *const Reader, allocator: std.mem.Allocator) void {
 
 pub fn readHandshake(self: *Reader) !?HandShake {
     var hs_bytes: [Message.HANDSHAKE_LEN]u8 = undefined;
-    const n = posix.read(self.socket, hs_bytes) catch |err| return switch (err) {
+    const n = posix.read(self.socket, &hs_bytes) catch |err| return switch (err) {
         error.WouldBlock => null,
         else => err,
     };
