@@ -1,3 +1,7 @@
+//! Top level entity that handles the main event loop and coordination
+//! between all compontents: filesystem thread, tracker requests, piece_picker
+//! peer connections.
+
 pub const Session = struct {
     alloc: std.mem.Allocator,
 
@@ -43,6 +47,7 @@ pub const Session = struct {
             log.err("{t}. Exiting.", .{err});
             std.process.exit(1);
         };
+
         try tracker.announce(alloc);
         const expected_peer_capacity = @min(128, tracker.peers.?.len);
 

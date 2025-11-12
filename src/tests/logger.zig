@@ -9,7 +9,7 @@ pub fn logFn(
 ) void {
     comptime var buf: [10]u8 = undefined;
     const upper_level = comptime std.ascii.upperString(&buf, message_level.asText());
-    const padded_plain = std.fmt.comptimePrint("{s:<5}", .{upper_level});
+    const padded_plain = std.fmt.comptimePrint("{s}", .{upper_level});
 
     const colored_level = comptime switch (message_level) {
         .debug => ansi.brightWhite ++ padded_plain ++ ansi.reset,

@@ -241,6 +241,7 @@ pub fn ensureFsStructure(self: *Self) !void {
         .SingleFile => try self.ensureSingleFile(),
         .MultiFile => try self.ensureMultiFile(),
     }
+    log.info("file structure created successfully", .{});
 }
 
 /// Creates the downloading file

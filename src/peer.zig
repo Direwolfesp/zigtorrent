@@ -150,10 +150,13 @@ pub const PeerConnection = struct {
                         switch (m.id) {
                             .bitfield => try self.parseBitfield(m),
                             .have => try self.parseHave(m),
-                            else => log.err(
-                                "[{f}] Expected bitfield but found '{t}'",
-                                .{ self.addr, m.id },
-                            ),
+                            else => {
+                                log.err("[{f}] Expected bitfield but found '{t}'", .{
+                                    self.addr,
+                                    m.id,
+                                });
+                                return;
+                            },
                         }
                         log.info("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
                         try self.man.picker.register_peer_pieces(self.peer_bitfield);
@@ -381,7 +384,7 @@ pub const PeerConnection = struct {
 
             log.debug("handshaked with peer {f}", .{self.addr});
 
-            const n_bytes: usize = self.man.torrent.getNumPieces() + 7 / 8;
+            const n_bytes: usize = (self.man.torrent.getNumPieces() + 7) / 8;
             const empty_bytes = try self.man.alloc.alloc(u8, n_bytes);
             defer self.man.alloc.free(empty_bytes);
 
