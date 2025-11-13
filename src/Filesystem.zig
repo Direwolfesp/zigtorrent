@@ -237,9 +237,14 @@ fn checkIntegrity(self: *Self, task: *const IOMessage) !bool {
 /// are created in the filesystem. If they already
 /// exist thats considered an error
 pub fn ensureFsStructure(self: *Self) !void {
+    log.debug(
+        \\ piece legnth: {d},
+        \\ num pieces: {d},
+    , .{ self.torr.info.piece_length, self.torr.info.pieces.len });
+
     switch (self.torr.getType()) {
-        .SingleFile => try self.ensureSingleFile(),
-        .MultiFile => try self.ensureMultiFile(),
+        .single_file => try self.ensureSingleFile(),
+        .multi_file => try self.ensureMultiFile(),
     }
     log.info("file structure created successfully", .{});
 }

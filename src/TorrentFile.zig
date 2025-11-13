@@ -4,18 +4,14 @@ const content_style = ansi.brightWhite ++ ansi.dim;
 const TorrentError = error{
     FileNotFound,
     WrongType,
-    MisingField,
+    MissingField,
     IlegalStructure,
 };
 
 const TorrentType = enum(u8) {
-    SingleFile,
-    MultiFile,
+    single_file,
+    multi_file,
 };
-
-const stdout = std.fs.File.stdout();
-var stderr = std.fs.File.stderr().writer(&.{});
-const err = &stderr.interface;
 
 const TorrentFile = @This();
 
@@ -90,7 +86,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
     const metaDict = &value.dict;
 
     // announce
-    const announce: bencode.Value = metaDict.get("announce") orelse return TorrentError.MisingField;
+    const announce: bencode.Value = metaDict.get("announce") orelse return TorrentError.MissingField;
     if (announce != .string) return TorrentError.WrongType;
 
     // Optional stuff
@@ -128,7 +124,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
     };
 
     // info
-    const info = metaDict.get("info") orelse return TorrentError.MisingField;
+    const info = metaDict.get("info") orelse return TorrentError.MissingField;
     if (info != .dict) return TorrentError.WrongType;
     const infoDict = &info.dict;
 
@@ -142,10 +138,10 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
     const info_hash: [Sha1.digest_length]u8 = sha1.finalResult();
 
     // piece length
-    const piece_length = infoDict.get("piece length") orelse return TorrentError.MisingField;
+    const piece_length = infoDict.get("piece length") orelse return TorrentError.MissingField;
     if (piece_length != .integer) return TorrentError.WrongType;
 
-    const pieces = infoDict.get("pieces") orelse return TorrentError.MisingField;
+    const pieces = infoDict.get("pieces") orelse return TorrentError.MissingField;
     if (pieces != .string) return TorrentError.WrongType;
     const num_pieces: usize = pieces.string.len / 20;
 
@@ -157,7 +153,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
         hash.* = pieces.string[i * 20 .. i * 20 + 20][0..20].*;
 
     // name
-    const name = infoDict.get("name") orelse return TorrentError.MisingField;
+    const name = infoDict.get("name") orelse return TorrentError.MissingField;
     if (name != .string) return TorrentError.WrongType;
 
     // length (Only present in single file)
@@ -185,7 +181,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
             const file = &file_dict.dict;
 
             const file_length = file.get("length").?.integer;
-            const list_of_paths = file.get("path") orelse return TorrentError.MisingField;
+            const list_of_paths = file.get("path") orelse return TorrentError.MissingField;
             std.debug.assert(list_of_paths == .list);
 
             const paths: [][]const u8 = try allocator.alloc([]const u8, list_of_paths.list.items.len);
@@ -230,7 +226,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
 pub fn deinit(self: *TorrentFile, alloc: Allocator) void {
     alloc.free(self.info.pieces);
 
-    if (self.getType() == .MultiFile) {
+    if (self.getType() == .multi_file) {
         for (self.info.mode.files) |file|
             alloc.free(file.path);
         alloc.free(self.info.mode.files);
@@ -242,12 +238,12 @@ pub fn deinit(self: *TorrentFile, alloc: Allocator) void {
 /// Calculates the torrent download size, it should be called once
 fn initDownloadSize(self: *TorrentFile) void {
     self.download_size = switch (self.getType()) {
-        .MultiFile => blk: {
+        .multi_file => blk: {
             var total: i64 = 0;
             for (self.info.mode.files) |f| total += f.length;
             break :blk total;
         },
-        .SingleFile => self.info.mode.length,
+        .single_file => self.info.mode.length,
     };
 }
 
@@ -257,8 +253,8 @@ pub fn getNumPieces(self: *const TorrentFile) usize {
 
 pub fn getType(self: *const TorrentFile) TorrentType {
     return switch (self.info.mode) {
-        .files => .MultiFile,
-        .length => .SingleFile,
+        .files => .multi_file,
+        .length => .single_file,
     };
 }
 
@@ -289,20 +285,27 @@ pub fn calculatePieceSize(self: *const TorrentFile, index: usize) !i64 {
 /// Caller owns the returned memory. (call deinit())
 pub fn open(allocator: Allocator, path: []const u8) !TorrentManaged {
     var file = std.fs.cwd().openFile(path, .{}) catch |e| {
-        try err.print("Could not open file '{s}'. Error: {t}\n", .{ path, e });
+        log.err("Could not open file '{s}'. Error: {t}\n", .{ path, e });
         std.process.exit(1);
     };
     defer file.close();
 
     const contents: []const u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    errdefer allocator.free(contents);
+
     var b: Value = bencode.decodeBencode(allocator, contents) catch |e| {
-        try err.print("Could not parse bencode contents from file '{s}'\n", .{path});
+        log.err("File contains invalid bencode: '{s}'\n", .{path});
         return e;
     };
     errdefer b.deinit(allocator);
 
+    const torrent = TorrentFile.init(allocator, b) catch |err| {
+        log.err("Could not parse torrent file: {t}", .{err});
+        std.process.exit(1);
+    };
+
     return .{
-        .meta = try TorrentFile.init(allocator, b),
+        .meta = torrent,
         .backing_buff = contents,
     };
 }
@@ -357,9 +360,9 @@ pub fn printMetaInfo(self: *const TorrentFile, alloc: Allocator, out: *std.Io.Wr
     if (self.created_by) |created_by|
         try print_row(out, " > Created by:", "{s}\n", .{created_by});
 
-    if (torr_type == .SingleFile) {
+    if (torr_type == .single_file) {
         try print_row(out, " > Size:", "{B}\n", .{@as(u64, @intCast(self.info.mode.length))});
-    } else if (torr_type == .MultiFile) {
+    } else if (torr_type == .multi_file) {
         try out.print("{s} > Multi-file:{s}\n", .{ title_style, reset });
 
         std.mem.sort(File, self.info.mode.files, {}, File.ord_func);
@@ -415,7 +418,7 @@ test "torrent_file: parse single-file torrent" {
     try expectEqualStrings("sample.txt", torr.info.name);
     try expectEqualStrings("mktorrent 1.1", torr.created_by.?);
     try expectEqualStrings("http://bittorrent-test-tracker.codecrafters.io/announce", torr.announce);
-    try expect(torr.getType() == .SingleFile);
+    try expect(torr.getType() == .single_file);
 }
 
 const log = std.log.scoped(.TorrentFile);

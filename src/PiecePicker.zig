@@ -196,11 +196,11 @@ pub fn updateAllBlockStates(self: *Self, piece: u32, new_state: BlockState) void
 
 // For each set bit in bitfield, increment piece availabity
 pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !void {
-    // FIXME
     std.debug.assert(bitfield.count() > 0);
+
     log.debug("peer has {d} pieces out of {d}", .{
         bitfield.count(),
-        self.torrent.getNumPieces(), // ¿? why is it returning garbage
+        self.torrent.getNumPieces(),
     });
 
     var iter = bitfield.iterator(.{ .kind = .set });

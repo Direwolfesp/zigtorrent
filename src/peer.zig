@@ -101,7 +101,7 @@ pub const PeerConnection = struct {
         for (bitfield.payload.?) |bf_byte| {
             var mask: u8 = 0b1000_0000;
             for (0..8) |_| {
-                if (mask & bf_byte != 0 and index < self.man.torrent.getNumPieces()) {
+                if (mask & bf_byte != 0 and index < self.man.torrent.meta.getNumPieces()) {
                     self.peer_bitfield.set(index);
                 }
                 mask >>= 1;
@@ -128,7 +128,7 @@ pub const PeerConnection = struct {
             .connected => {},
             .waiting_handshake => self.recv_handshake(
                 self.man.peer_id,
-                &self.man.torrent,
+                &self.man.torrent.meta,
             ) catch |err|
                 switch (err) {
                     error.InvalidHandshake => {
@@ -204,7 +204,7 @@ pub const PeerConnection = struct {
                 // if we are not downloading a piece, ask the picker one to download
                 if (self.curr_piece == null) {
                     self.curr_piece = (try self.man.picker.pickPiece(self.peer_bitfield)).?;
-                    self.curr_piece_len = @intCast(try self.man.torrent.calculatePieceSize(self.curr_piece.?));
+                    self.curr_piece_len = @intCast(try self.man.torrent.meta.calculatePieceSize(self.curr_piece.?));
                     self.requested = 0;
                     // NOTE: realloc the previous piece with the new size, the
                     // filesystem will still keep a copy of the previous one
@@ -346,7 +346,7 @@ pub const PeerConnection = struct {
         }
 
         self.session.state = .sending_handshake;
-        const written = try self.writer.writeHandshake(self.man.peer_id, &self.man.torrent);
+        const written = try self.writer.writeHandshake(self.man.peer_id, &self.man.torrent.meta);
 
         // if we didnt manage to write the handshake keep writing
         if (!written) {
@@ -384,7 +384,7 @@ pub const PeerConnection = struct {
 
             log.debug("handshaked with peer {f}", .{self.addr});
 
-            const n_bytes: usize = (self.man.torrent.getNumPieces() + 7) / 8;
+            const n_bytes: usize = (self.man.torrent.meta.getNumPieces() + 7) / 8;
             const empty_bytes = try self.man.alloc.alloc(u8, n_bytes);
             defer self.man.alloc.free(empty_bytes);
 

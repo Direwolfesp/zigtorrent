@@ -7,7 +7,7 @@ pub const Session = struct {
 
     peer_id: [20]u8,
 
-    torrent: TorrentFile,
+    torrent: TorrentFile.TorrentManaged,
 
     tracker: Tracker,
 
@@ -30,43 +30,50 @@ pub const Session = struct {
         alloc: std.mem.Allocator,
         torrent_path: []const u8,
     ) !Self {
-        var torrent = try TorrentFile.open(alloc, torrent_path);
-        errdefer torrent.deinit(alloc);
+        var t = try TorrentFile.open(alloc, torrent_path);
+        errdefer t.deinit(alloc);
 
-        var tracker = try Tracker.init(&torrent.meta);
-        errdefer tracker.deinit(alloc);
-
-        var fs_manager = try Filesystem.init(alloc, &torrent.meta, 1024);
-        errdefer fs_manager.deinit();
-
-        var picker = try PiecePicker.init(&torrent.meta, alloc);
-        errdefer picker.deinit();
+        var ret = Self{
+            .peer_id = undefined,
+            .alloc = alloc,
+            .torrent = t,
+            .tracker = undefined,
+            .fs = undefined,
+            .picker = undefined,
+            .epoll = try Epoll.init(),
+            .peers = .empty,
+            .running = false,
+            .stop_signal = .init(false),
+        };
 
         // initialize rest of the modules
+        var tracker = try Tracker.init(&ret.torrent.meta);
+        errdefer tracker.deinit(alloc);
+
+        var fs_manager = try Filesystem.init(alloc, &ret.torrent.meta, 1024);
+        errdefer fs_manager.deinit();
+
+        var picker = try PiecePicker.init(&ret.torrent.meta, alloc);
+        errdefer picker.deinit();
+
         fs_manager.ensureFsStructure() catch |err| {
             log.err("{t}. Exiting.", .{err});
             std.process.exit(1);
         };
 
+        // contact with the tracker via http request to gather all
+        // peers and reserve memory for them in the hashmap. Epoll
+        // is limited to 128 peers so we reserve the minimum available.
         try tracker.announce(alloc);
         const expected_peer_capacity = @min(128, tracker.peers.?.len);
-
         var peers_map: std.AutoHashMapUnmanaged(u64, *PeerConnection) = .empty;
         try peers_map.ensureTotalCapacity(alloc, expected_peer_capacity);
-        const ep = try Epoll.init();
 
-        return Self{
-            .peer_id = tracker.peer_id,
-            .alloc = alloc,
-            .torrent = torrent.meta,
-            .tracker = tracker,
-            .fs = fs_manager,
-            .picker = picker,
-            .epoll = ep,
-            .peers = peers_map,
-            .running = false,
-            .stop_signal = .init(false),
-        };
+        ret.tracker = tracker;
+        ret.fs = fs_manager;
+        ret.picker = picker;
+        ret.peers = peers_map;
+        return ret;
     }
 
     pub fn deinit(self: *Self) void {
@@ -137,7 +144,7 @@ pub const Session = struct {
             const init_result = PeerConnection.init(
                 self.alloc,
                 .{ .in = tracker_peer },
-                self.torrent.getNumPieces(),
+                self.torrent.meta.getNumPieces(),
                 self,
                 16 * 1024,
                 16 * 1024,
