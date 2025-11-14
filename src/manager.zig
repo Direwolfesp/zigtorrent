@@ -148,8 +148,8 @@ pub const Session = struct {
                 .{ .in = tracker_peer },
                 self.torrent.meta.getNumPieces(),
                 self,
-                16 * 1024,
-                16 * 1024,
+                PeerConnection.DEFAULT_WRITE_BUF,
+                PeerConnection.DEFAULT_READ_BUF,
             ) catch |err| {
                 log.err("Error initializing peer with address {f}: {t}", .{ tracker_peer, err });
                 self.alloc.destroy(p);

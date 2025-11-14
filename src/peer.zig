@@ -52,6 +52,10 @@ pub const PeerConnection = struct {
     writer: Writer,
 
     const Self = @This();
+    /// default size for writer buffer
+    pub const DEFAULT_WRITE_BUF = 0x4000;
+    /// default size for reader buffer
+    pub const DEFAULT_READ_BUF = 0x4000 * 2;
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -264,8 +268,8 @@ pub const PeerConnection = struct {
                 defer msg.deinit(alloc);
 
                 if (msg.id == .piece) {
-                    const index = std.mem.readInt(u32, msg.payload.?[0..4], .little);
-                    const begin = std.mem.readInt(u32, msg.payload.?[4..8], .little);
+                    const index = std.mem.readInt(u32, msg.payload.?[0..4], .big);
+                    const begin = std.mem.readInt(u32, msg.payload.?[4..8], .big);
                     const block: []const u8 = msg.payload.?[8..];
 
                     if (index == self.curr_piece.?) {
@@ -331,9 +335,9 @@ pub const PeerConnection = struct {
 
     pub fn sendRequest(self: *Self, index: u32, begin: u32, length: u32) !void {
         var req_payload: [12]u8 = undefined;
-        std.mem.writeInt(u32, req_payload[0..4], index, .little);
-        std.mem.writeInt(u32, req_payload[4..8], begin, .little);
-        std.mem.writeInt(u32, req_payload[8..12], length, .little);
+        std.mem.writeInt(u32, req_payload[0..4], index, .big);
+        std.mem.writeInt(u32, req_payload[4..8], begin, .big);
+        std.mem.writeInt(u32, req_payload[8..12], length, .big);
         _ = try self.writer.writeMessage(.{
             .id = .request,
             .payload = &req_payload,

@@ -63,18 +63,23 @@ pub fn writeMessage(self: *Self, msg: Message) Error!bool {
     const total_len: u32 = 1 + if (msg.payload) |p| @as(u32, @intCast(p.len)) else 0;
     if (total_len + 4 > self.write_buf.len) return Error.BufferTooSmall;
 
-    std.mem.writeInt(u32, self.write_buf[0..4], total_len, .big);
-
     if (msg.id != .keep_alive) {
+        // length
+        std.mem.writeInt(u32, self.write_buf[0..4], total_len, .big);
+        // id
         self.write_buf[4] = @intFromEnum(msg.id);
-    }
 
-    if (msg.payload) |p| {
-        @memmove(self.write_buf[5 .. 5 + p.len], p);
+        // payload
+        if (msg.payload) |p| {
+            @memmove(self.write_buf[5 .. 5 + p.len], p);
+        }
+        self.to_write = self.write_buf[0 .. 4 + total_len];
+        return try self.flush();
+    } else {
+        std.mem.writeInt(u32, self.write_buf[0..4], 0, .big);
+        self.to_write = self.write_buf[0..4];
+        return try self.flush();
     }
-
-    self.to_write = self.write_buf[0 .. 4 + total_len];
-    return try self.flush();
 }
 
 /// dumps `to_write` into the socket
