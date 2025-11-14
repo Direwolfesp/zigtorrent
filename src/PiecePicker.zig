@@ -183,7 +183,7 @@ pub fn updateBlockState(self: *Self, piece: u32, block: i64, state: BlockState) 
         std.debug.assert(num_blocks > block);
         std.debug.assert(dl.block_state.items.len == num_blocks);
         dl.block_state.items[@intCast(block)] = state;
-        log.info("updated block {d} from piece {d} to {t}", .{ block, piece, state });
+        log.debug("updated block {d} from piece {d} to {t}", .{ block, piece, state });
         return true;
     } else {
         log.warn("Could not update block state, Piece {d} doesn't have block {d}", .{ piece, block });

@@ -113,7 +113,7 @@ pub const PeerConnection = struct {
             }
         }
         self.session.state = .normal;
-        log.info("[{f}] parsed bitfield, going to normal mode", .{self.addr});
+        log.debug("[{f}] parsed bitfield, going to normal mode", .{self.addr});
         try self.loop.?.writeMode(self); // we want to write interested
     }
 
@@ -123,7 +123,7 @@ pub const PeerConnection = struct {
         self.peer_bitfield.set(piece);
         try self.man.picker.inc_piece_refcount(piece);
         self.session.state = .normal;
-        log.info("[{f}] parsed have, going to normal mode", .{self.addr});
+        log.debug("[{f}] parsed have, going to normal mode", .{self.addr});
         try self.loop.?.writeMode(self); // we want to write interested
     }
 
@@ -164,7 +164,7 @@ pub const PeerConnection = struct {
                             return;
                         },
                     }
-                    log.info("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
+                    log.debug("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
                     self.man.picker.register_peer_pieces(self.peer_bitfield) catch |err| {
                         log.err("[{f}] Could not register peer pieces from his bitfield: {t}", .{ self.addr, err });
                     };
@@ -192,7 +192,7 @@ pub const PeerConnection = struct {
             .connected => try self.init_handshake(),
             .sending_handshake => try self.init_handshake(),
             .normal => try self.handleNormal(alloc, .WRITE),
-            else => log.info("[{f}] unhandled write: {t}", .{ self.addr, self.session.state }),
+            else => log.debug("[{f}] unhandled write: {t}", .{ self.addr, self.session.state }),
         }
     }
 
@@ -200,7 +200,7 @@ pub const PeerConnection = struct {
         if (event == .WRITE) {
             // write interested
             if (!self.session.is_interested and self.session.is_choked) {
-                log.info("[{f}] sending interested\n", .{self.addr});
+                log.debug("[{f}] sending interested\n", .{self.addr});
                 const written = try self.writer.writeMessage(.{
                     .id = .interested,
                     .payload = null,
@@ -208,7 +208,7 @@ pub const PeerConnection = struct {
 
                 if (written) {
                     // wait for unchoke
-                    log.info("[{f}] sent interested\n", .{self.addr});
+                    log.debug("[{f}] sent interested\n", .{self.addr});
                     try self.loop.?.readMode(self);
                     self.session.is_interested = true;
                 }
@@ -231,7 +231,7 @@ pub const PeerConnection = struct {
                     self.requested < self.curr_piece_len.?)
                 {
                     const block_size = @min(16 * 1024, self.curr_piece_len.? - self.requested);
-                    log.info("[{f}] sending request {any}", .{
+                    log.debug("[{f}] sending request {any}", .{
                         self.addr,
                         .{
                             .index = self.curr_piece.?,
@@ -256,7 +256,7 @@ pub const PeerConnection = struct {
                     defer msg.deinit(alloc);
                     if (msg.id == .unchoke) {
                         // we can start requesting blocks
-                        log.info("[{f}] peer unchoked us", .{self.addr});
+                        log.debug("[{f}] peer unchoked us", .{self.addr});
                         self.session.is_choked = false;
                         try self.loop.?.writeMode(self);
                     }
@@ -280,7 +280,7 @@ pub const PeerConnection = struct {
                         self.downloaded += @intCast(block.len);
                         self.current_request_pipeline -= 1;
 
-                        log.info("[{f}] peer sent piece: {any}", .{
+                        log.debug("[{f}] peer sent piece: {any}", .{
                             self.addr,
                             .{
                                 .index = index,
@@ -291,7 +291,7 @@ pub const PeerConnection = struct {
 
                         // we downloaded a piece
                         if (self.downloaded == self.curr_piece_len) {
-                            log.info("[{f}] we completed piece {d}, submitting to disk_io thread ", .{ self.addr, index });
+                            log.debug("[{f}] we completed piece {d}, submitting to disk_io thread ", .{ self.addr, index });
                             // submit store and hash request to filesystem thread
                             try self.man.fs.submit(.{
                                 .sender = self,
@@ -387,13 +387,13 @@ pub const PeerConnection = struct {
 
         // if we didnt manage to write the handshake keep writing
         if (!written) {
-            log.info("[{f}] handshake not fully sent", .{self.addr});
+            log.debug("[{f}] handshake not fully sent", .{self.addr});
             self.loop.?.writeMode(self) catch |err| {
                 log.err("Could not set socket {d} for writing: {t}", .{ self.socket, err });
             };
         } else {
             // switch to reading his handshake
-            log.info("[{f}] handshake sent", .{self.addr});
+            log.debug("[{f}] handshake sent", .{self.addr});
             self.session.state = .waiting_handshake;
             self.loop.?.readMode(self) catch |err| {
                 log.err("Could not set socket {d} for reading: {t}", .{ self.socket, err });

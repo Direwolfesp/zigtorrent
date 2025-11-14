@@ -55,7 +55,6 @@ pub fn readMessage(self: *Reader, alloc: std.mem.Allocator) !?Message {
         else => return err,
     };
     if (n == 0) return error.Closed;
-    std.debug.print("readMessage: read {d} bytes\n", .{n});
     self.pos += n;
 
     if (try self.bufferedMessage()) |msg| {
