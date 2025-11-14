@@ -264,7 +264,8 @@ pub const PeerConnection = struct {
             }
             // try to read piece
             else if (self.session.is_interested and !self.session.is_choked) {
-                const msg = (try self.reader.readMessage(alloc)).?;
+                // if we didnt read any message return
+                const msg = try self.reader.readMessage(alloc) orelse return;
                 defer msg.deinit(alloc);
 
                 if (msg.id == .piece) {
