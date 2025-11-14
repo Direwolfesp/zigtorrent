@@ -111,13 +111,14 @@ pub const Session = struct {
         const fd_key: u64 = @intCast(peer.socket);
 
         // we already do this in peer.deinit()
-        // self.picker.unregister_peer_pieces(peer.peer_bitfield);
         _ = self.peers.remove(fd_key);
         try self.epoll.removeClient(peer);
 
         peer.deinit(self.alloc) catch |err| {
             log.err("peer.deinit failed: {t}", .{err});
+            return;
         };
+        log.info("{f} peer removed from session.", .{peer.addr});
     }
 
     pub fn connectToPeers(self: *Self) !void {
@@ -125,6 +126,7 @@ pub const Session = struct {
         if (peer_list.len == 0) return error.NoPeersFound;
 
         // epoll uses 128 max so its appropiate
+        // TEMP: I put 2 for testing
         const max_concurrent: usize = @intCast(@min(128, peer_list.len));
         var tried: usize = 0;
         var connected: usize = 0;
@@ -172,7 +174,6 @@ pub const Session = struct {
             // add peer to eloop
             self.addPeer(p) catch |err| {
                 log.err("Error while registering peer to event loop: {t}", .{err});
-
                 self.epoll.removeClient(p) catch |rem_err| {
                     log.err("[{f}] removeClient failed during cleanup: {t}", .{ p.addr, rem_err });
                     p.deinit(self.alloc) catch |deinit_err| {
@@ -189,7 +190,7 @@ pub const Session = struct {
             tried += 1;
         }
 
-        log.info("tried to connect to {d} peers, connected {d}", .{ tried, connected });
+        log.info("attempted to connect with {d} peers, connected {d}", .{ tried, connected });
     }
 
     /// Main loop. This pumps epoll and the filesystem completion queue.
@@ -205,27 +206,27 @@ pub const Session = struct {
         const poll_timeout_ms = 100;
 
         while (true) {
-            if (self.stop_signal.load(.seq_cst)) break;
+            if (self.stop_signal.load(.seq_cst) or self.peers.count() == 0) break;
 
             const events = self.epoll.wait(poll_timeout_ms);
             for (events) |r| {
                 const peer: *PeerConnection = @ptrFromInt(r.data.ptr);
 
                 if ((r.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
-                    log.warn("epoll: peer hup/err {d}", .{peer.socket});
+                    log.warn("[{f}] epoll failed, this socket might have been closed. Disconnecting peer...", .{peer.addr});
                     _ = try self.removePeer(peer);
                     continue;
                 }
 
                 if ((r.events & linux.EPOLL.IN) != 0) {
                     peer.handle_read(self.alloc) catch |err| {
-                        log.err("peer.handle_read error: {t}", .{err});
+                        log.err("[{f}] peer.handle_read error: {t}", .{ peer.addr, err });
                         _ = try self.removePeer(peer);
                         continue;
                     };
                 } else if ((r.events & linux.EPOLL.OUT) != 0) {
                     peer.handle_write(self.alloc) catch |err| {
-                        log.err("peer.handle_write error: {t}", .{err});
+                        log.err("[{f}] peer.handle_write error: {t}", .{ peer.addr, err });
                         _ = try self.removePeer(peer);
                         continue;
                     };
@@ -234,6 +235,7 @@ pub const Session = struct {
 
             // process fs competions
             while (self.fs.receive()) |io_msg| {
+                log.info("Processing disk_io message", .{});
                 io_msg.sender.onIOMessage(io_msg);
             }
         }

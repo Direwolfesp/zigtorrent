@@ -101,32 +101,37 @@ pub fn deinit(self: *Self) void {
 
 /// Finding a rare piece for a peer:
 pub fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
-    for (self.pieces.items, 0..) |p, i| {
+    for (self.pieces.items, 0..) |piece, i| {
         // if the piece is in `pieces`, the index of the piece must match the one
         // from `piece_map`
-        std.debug.assert(self.piece_map.items[p].index.? == i);
+        std.debug.assert(self.piece_map.items[piece].index.? == i);
 
         // Only pick pieces that the peer have
-        if (have.isSet(p)) {
+        // and that they havent already been picked.
+        // NOTE: maybe we should pick pieces that have been already picked by
+        // other connections but just requesting blocks that have not been requested.
+        // basically separating the piece picking from block picking logic.
+        if (have.isSet(piece)) {
             // Once we have the piece, we either look-up the `DownloadingPiece`
             // object, or create a new one (and update the state in `piece_map` by
             // setting it to true). In the `DownloadingPiece` we mark the blocks
             // we pick as requested, to avoid picking them again.
-            if (self.downloading.get(p) == null) {
-                const num_blocks = try self.torrent.calculateNumBlocks(p);
+            if (self.downloading.get(piece) == null) {
+                const num_blocks = try self.torrent.calculateNumBlocks(piece);
                 var block_state: std.ArrayList(BlockState) = try .initCapacity(self.alloc, @intCast(num_blocks));
+                errdefer block_state.deinit(self.alloc);
                 block_state.appendNTimesAssumeCapacity(.pending, @intCast(num_blocks));
 
-                try self.downloading.put(p, DownloadingPiece{
+                try self.downloading.put(piece, DownloadingPiece{
                     .index = @intCast(i),
                     .block_state = block_state,
                 });
-                self.piece_map.items[p].state = true;
+                self.piece_map.items[piece].state = true;
+                return piece;
             }
-            return p;
         }
     }
-    log.debug("Couldn't pick a piece", .{});
+    log.warn("Couldn't pick a piece", .{});
     // we might want to enter end-game mode or drop the connection
     return null;
 }
@@ -177,7 +182,8 @@ pub fn updateBlockState(self: *Self, piece: u32, block: i64, state: BlockState) 
         const num_blocks = try self.torrent.calculateNumBlocks(piece);
         std.debug.assert(num_blocks > block);
         std.debug.assert(dl.block_state.items.len == num_blocks);
-        dl.block_state.items[block] = state;
+        dl.block_state.items[@intCast(block)] = state;
+        log.info("updated block {d} from piece {d} to {t}", .{ block, piece, state });
         return true;
     } else {
         log.warn("Could not update block state, Piece {d} doesn't have block {d}", .{ piece, block });

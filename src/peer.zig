@@ -105,10 +105,11 @@ pub const PeerConnection = struct {
                     self.peer_bitfield.set(index);
                 }
                 mask >>= 1;
+                index += 1;
             }
-            index += 1;
         }
         self.session.state = .normal;
+        log.info("[{f}] parsed bitfield, going to normal mode", .{self.addr});
         try self.loop.?.writeMode(self); // we want to write interested
     }
 
@@ -118,10 +119,12 @@ pub const PeerConnection = struct {
         self.peer_bitfield.set(piece);
         try self.man.picker.inc_piece_refcount(piece);
         self.session.state = .normal;
+        log.info("[{f}] parsed have, going to normal mode", .{self.addr});
         try self.loop.?.writeMode(self); // we want to write interested
     }
 
     pub fn handle_read(self: *Self, alloc: std.mem.Allocator) !void {
+        log.debug("[{f}] Entering handle read", .{self.addr});
         switch (self.session.state) {
             .disconnected => {},
             .connecting => {},
@@ -144,23 +147,23 @@ pub const PeerConnection = struct {
             .sending_handshake => {},
             .waiting_availability => {
                 if (self.reader.readMessage(alloc)) |msg| {
-                    if (msg) |m| {
-                        defer m.deinit(alloc);
-
-                        switch (m.id) {
-                            .bitfield => try self.parseBitfield(m),
-                            .have => try self.parseHave(m),
-                            else => {
-                                log.err("[{f}] Expected bitfield but found '{t}'", .{
-                                    self.addr,
-                                    m.id,
-                                });
-                                return;
-                            },
-                        }
-                        log.info("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
-                        try self.man.picker.register_peer_pieces(self.peer_bitfield);
+                    const m = msg orelse return;
+                    defer m.deinit(alloc);
+                    switch (m.id) {
+                        .bitfield => try self.parseBitfield(m),
+                        .have => try self.parseHave(m),
+                        else => {
+                            log.err("[{f}] Expected bitfield but found '{t}'", .{
+                                self.addr,
+                                m.id,
+                            });
+                            return;
+                        },
                     }
+                    log.info("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
+                    self.man.picker.register_peer_pieces(self.peer_bitfield) catch |err| {
+                        log.err("[{f}] Could not register peer pieces from his bitfield: {t}", .{ self.addr, err });
+                    };
                 } else |err| {
                     log.warn("[{f}] Error while waiting availability: {t}", .{
                         self.addr,
@@ -168,19 +171,24 @@ pub const PeerConnection = struct {
                     });
                 }
             },
-            .normal => try self.handleNormal(alloc, .READ),
+            .normal => self.handleNormal(alloc, .READ) catch |err| switch (err) {
+                error.Closed => {
+                    log.warn("[{f}] handle normal: connection closed, removing peer", .{self.addr});
+                    try self.man.removePeer(self);
+                },
+                else => return err,
+            },
         }
     }
 
     pub fn handle_write(self: *Self, alloc: std.mem.Allocator) !void {
+        log.debug("[{f}] Entering handle write", .{self.addr});
         switch (self.session.state) {
-            .disconnected => {},
             .connecting => try self.connect(self.loop.?),
             .connected => try self.init_handshake(),
             .sending_handshake => try self.init_handshake(),
-            .waiting_handshake => {},
-            .waiting_availability => {},
             .normal => try self.handleNormal(alloc, .WRITE),
+            else => log.info("[{f}] unhandled write: {t}", .{ self.addr, self.session.state }),
         }
     }
 
@@ -188,6 +196,7 @@ pub const PeerConnection = struct {
         if (event == .WRITE) {
             // write interested
             if (!self.session.is_interested and self.session.is_choked) {
+                log.info("[{f}] sending interested\n", .{self.addr});
                 const written = try self.writer.writeMessage(.{
                     .id = .interested,
                     .payload = null,
@@ -195,6 +204,7 @@ pub const PeerConnection = struct {
 
                 if (written) {
                     // wait for unchoke
+                    log.info("[{f}] sent interested\n", .{self.addr});
                     try self.loop.?.readMode(self);
                     self.session.is_interested = true;
                 }
@@ -209,6 +219,7 @@ pub const PeerConnection = struct {
                     // NOTE: realloc the previous piece with the new size, the
                     // filesystem will still keep a copy of the previous one
                     self.piece_buf = try alloc.realloc(self.piece_buf, @intCast(self.curr_piece_len.?));
+                    log.info("[{f}] picked piece: {d}", .{ self.addr, self.curr_piece.? });
                 }
 
                 // request pipeline
@@ -216,7 +227,17 @@ pub const PeerConnection = struct {
                     self.requested < self.curr_piece_len.?)
                 {
                     const block_size = @min(16 * 1024, self.curr_piece_len.? - self.requested);
+                    log.info("[{f}] sending request {any}", .{
+                        self.addr,
+                        .{
+                            .index = self.curr_piece.?,
+                            .offset = self.requested,
+                            .block_size = block_size,
+                        },
+                    });
                     try self.sendRequest(self.curr_piece.?, self.requested, block_size);
+                    const block_index = self.requested / 0x4000;
+                    _ = try self.man.picker.updateBlockState(self.curr_piece.?, block_index, .requested);
                     self.requested += block_size;
                     self.current_request_pipeline += 1;
                 }
@@ -231,6 +252,7 @@ pub const PeerConnection = struct {
                     defer msg.deinit(alloc);
                     if (msg.id == .unchoke) {
                         // we can start requesting blocks
+                        log.info("[{f}] peer unchoked us", .{self.addr});
                         self.session.is_choked = false;
                         try self.loop.?.writeMode(self);
                     }
@@ -246,15 +268,25 @@ pub const PeerConnection = struct {
                     const begin = std.mem.readInt(u32, msg.payload.?[4..8], .little);
                     const block: []const u8 = msg.payload.?[8..];
 
-                    if (index == self.curr_piece) {
+                    if (index == self.curr_piece.?) {
                         // write piece to buffer
                         @memcpy(self.piece_buf[begin..][0..block.len], block);
 
                         self.downloaded += @intCast(block.len);
                         self.current_request_pipeline -= 1;
 
+                        log.info("[{f}] peer sent piece: {any}", .{
+                            self.addr,
+                            .{
+                                .index = index,
+                                .begin = begin,
+                                .block = block.len,
+                            },
+                        });
+
                         // we downloaded a piece
                         if (self.downloaded == self.curr_piece_len) {
+                            log.info("[{f}] we completed piece {d}, submitting to disk_io thread ", .{ self.addr, index });
                             // submit store and hash request to filesystem thread
                             try self.man.fs.submit(.{
                                 .sender = self,
@@ -350,11 +382,13 @@ pub const PeerConnection = struct {
 
         // if we didnt manage to write the handshake keep writing
         if (!written) {
+            log.info("[{f}] handshake not fully sent", .{self.addr});
             self.loop.?.writeMode(self) catch |err| {
                 log.err("Could not set socket {d} for writing: {t}", .{ self.socket, err });
             };
         } else {
             // switch to reading his handshake
+            log.info("[{f}] handshake sent", .{self.addr});
             self.session.state = .waiting_handshake;
             self.loop.?.readMode(self) catch |err| {
                 log.err("Could not set socket {d} for reading: {t}", .{ self.socket, err });
@@ -373,39 +407,17 @@ pub const PeerConnection = struct {
                 !std.mem.eql(u8, &hs.pstr, "BitTorrent protocol") or
                 !std.mem.eql(u8, &hs.info_hash, &torrent.info_hash))
             {
-                log.warn("Invalid handshake from peer {f}, wrong protocol or info hash", .{self.addr});
+                log.warn("[{f}] invalid handshake: peer setn wrong protocol or info hash", .{self.addr});
                 return error.InvalidHandshake;
             }
 
             if (std.mem.eql(u8, &peer_id, &hs.peer_id)) {
-                log.warn("Invalid handshake from peer {f}, peer sent our same id.", .{self.addr});
+                log.warn("[{f}] invalid handshake: peer sent our same id.", .{self.addr});
                 return error.InvalidHandshake;
             }
 
-            log.debug("handshaked with peer {f}", .{self.addr});
-
-            const n_bytes: usize = (self.man.torrent.meta.getNumPieces() + 7) / 8;
-            const empty_bytes = try self.man.alloc.alloc(u8, n_bytes);
-            defer self.man.alloc.free(empty_bytes);
-
-            // we try to start by sending out bitfield
-            const written_bt = try self.writer.writeMessage(.{
-                .id = .bitfield,
-                .payload = empty_bytes,
-            });
-
-            //
-            if (written_bt) {
-                try self.loop.?.readMode(self);
-                log.debug("[{f}] Bitfield sent successfully, going to read mode", .{self.addr});
-                self.session.state = .waiting_availability;
-                try self.loop.?.readMode(self);
-            } else {
-                log.debug("[{f}] bitfiled not sent completely", .{self.addr});
-                try self.loop.?.writeMode(self);
-            }
-
-            return;
+            log.debug("[{f}] handshaked successfully", .{self.addr});
+            self.session.state = .waiting_availability;
         } else {
             // Not enough bytes yet to form a full handshake. Caller should wait
             // for more data.

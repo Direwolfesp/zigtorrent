@@ -124,8 +124,7 @@ pub fn deinit(self: *Self) void {
 /// Add a message to the queue. Blocks if full
 pub fn submit(self: *Self, task: IOMessage) !void {
     std.debug.assert(task.payload.len <= self.torr.info.piece_length);
-    // NOTE: for now, i will just clone the payload so the filesystem thread has
-    // its own copy.
+    log.info("got a new submission: state = {t}, piece = {d}", .{ task.status, task.index });
     self.submission_queue.push(.{
         .status = task.status,
         .index = task.index,
@@ -237,11 +236,6 @@ fn checkIntegrity(self: *Self, task: *const IOMessage) !bool {
 /// are created in the filesystem. If they already
 /// exist thats considered an error
 pub fn ensureFsStructure(self: *Self) !void {
-    log.debug(
-        \\ piece legnth: {d},
-        \\ num pieces: {d},
-    , .{ self.torr.info.piece_length, self.torr.info.pieces.len });
-
     switch (self.torr.getType()) {
         .single_file => try self.ensureSingleFile(),
         .multi_file => try self.ensureMultiFile(),

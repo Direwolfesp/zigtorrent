@@ -249,8 +249,6 @@ fn parseResponse(
         alloc.free(old_peers);
     }
     self.peers = parsed_peers;
-
-    log.debug("Peer count: {d}", .{parsed_peers.len});
 }
 
 pub fn onDownload(self: *const Tracker, bytes: i64) void {
