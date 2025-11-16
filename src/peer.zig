@@ -40,13 +40,8 @@ pub const PeerConnection = struct {
     man: *manager.Session,
 
     // fields related to the current download state
-    piece_buf: []u8,
     current_request_pipeline: u32 = 0,
     target_request_pipeline: u32 = 10,
-    requested: u32 = 0, // bytes requested for that piece
-    downloaded: u32 = 0, // bytes received from peer
-    curr_piece: ?u32 = null,
-    curr_piece_len: ?u32 = null,
 
     reader: Reader,
     writer: Writer,
@@ -81,7 +76,6 @@ pub const PeerConnection = struct {
             .peer_bitfield = bitfield,
             .session = .{},
             .man = man,
-            .piece_buf = &.{},
         };
     }
 
@@ -91,9 +85,6 @@ pub const PeerConnection = struct {
 
         self.man.picker.unregister_peer_pieces(self.peer_bitfield);
         self.peer_bitfield.deinit(alloc);
-
-        // if (self.loop) |l|
-        //     try l.removeClient(self);
 
         if (self.socket != -1)
             std.posix.close(self.socket);
@@ -215,35 +206,16 @@ pub const PeerConnection = struct {
             }
             // request blocks
             else if (self.session.is_interested and !self.session.is_choked) {
-                // if we are not downloading a piece, ask the picker one to download
-                if (self.curr_piece == null) {
-                    self.curr_piece = (try self.man.picker.pickPiece(self.peer_bitfield)).?;
-                    self.curr_piece_len = @intCast(try self.man.torrent.meta.calculatePieceSize(self.curr_piece.?));
-                    self.requested = 0;
-                    // NOTE: realloc the previous piece with the new size, the
-                    // filesystem will still keep a copy of the previous one
-                    self.piece_buf = try alloc.realloc(self.piece_buf, @intCast(self.curr_piece_len.?));
-                    log.info("[{f}] picked piece: {d}", .{ self.addr, self.curr_piece.? });
-                }
-
                 // request pipeline
-                while (self.current_request_pipeline < self.target_request_pipeline and
-                    self.requested < self.curr_piece_len.?)
-                {
-                    const block_size = @min(16 * 1024, self.curr_piece_len.? - self.requested);
-                    log.debug("[{f}] sending request {any}", .{
-                        self.addr,
-                        .{
-                            .index = self.curr_piece.?,
-                            .offset = self.requested,
-                            .block_size = block_size,
-                        },
-                    });
-                    try self.sendRequest(self.curr_piece.?, self.requested, block_size);
-                    const block_index = self.requested / 0x4000;
-                    _ = try self.man.picker.updateBlockState(self.curr_piece.?, block_index, .requested);
-                    self.requested += block_size;
-                    self.current_request_pipeline += 1;
+                while (self.current_request_pipeline < self.target_request_pipeline) {
+                    if (try self.man.picker.pickBlock(self)) |b| {
+                        log.debug("[{f}] sending request {any}", .{ self.addr, b });
+                        try self.sendRequest(b);
+                        _ = try self.man.picker.updateBlockState(b.index, b.begin, .requested);
+                        self.current_request_pipeline += 1;
+                    } else {
+                        log.warn("[{f}] request: could not pick block", .{self.addr});
+                    }
                 }
                 // wait for piece
                 try self.loop.?.readMode(self);
@@ -269,62 +241,47 @@ pub const PeerConnection = struct {
                 defer msg.deinit(alloc);
 
                 if (msg.id == .piece) {
-                    const index = std.mem.readInt(u32, msg.payload.?[0..4], .big);
-                    const begin = std.mem.readInt(u32, msg.payload.?[4..8], .big);
-                    const block: []const u8 = msg.payload.?[8..];
+                    const block = Block{
+                        .index = std.mem.readInt(u32, msg.payload.?[0..4], .big),
+                        .begin = std.mem.readInt(u32, msg.payload.?[4..8], .big),
+                        .payload = msg.payload.?[8..],
+                    };
+                    log.debug("[{f}] peer sent piece: {any}", .{ self.addr, block });
 
-                    if (index == self.curr_piece.?) {
-                        // write piece to buffer
-                        @memcpy(self.piece_buf[begin..][0..block.len], block);
+                    self.current_request_pipeline -= 1;
 
-                        self.downloaded += @intCast(block.len);
-                        self.current_request_pipeline -= 1;
+                    // write to disk
+                    self.man.fs.writeBlock(block);
 
-                        log.debug("[{f}] peer sent piece: {any}", .{
-                            self.addr,
-                            .{
-                                .index = index,
-                                .begin = begin,
-                                .block = block.len,
-                            },
+                    // mark it as downloaded
+                    try self.man.picker.updateBlockState(block.index, block.begin, .downloaded);
+
+                    // if we downloaded the whole piece already, mark blocks as verifying and
+                    // enqueue task
+                    if (self.man.picker.isPieceDownloaded(block.index)) {
+                        self.man.picker.updateAllBlockStates(block.index, .verifying);
+                        try self.man.fs.submit(.{
+                            .status = .check_integrity,
+                            .index = block.index,
+                            .sender = self,
                         });
+                    }
 
-                        // we downloaded a piece
-                        if (self.downloaded == self.curr_piece_len) {
-                            log.debug("[{f}] we completed piece {d}, submitting to disk_io thread ", .{ self.addr, index });
-                            // submit store and hash request to filesystem thread
-                            try self.man.fs.submit(.{
-                                .sender = self,
-                                .status = .request_store,
-                                .index = @intCast(self.curr_piece.?),
-                                .payload = self.piece_buf,
-                            });
-
-                            self.requested = 0;
-                            self.downloaded = 0;
-                            self.curr_piece = null;
-                            self.curr_piece_len = null;
-
-                            // we want to write requests now
-                            try self.loop.?.writeMode(self);
-                        }
-                    } else {
-                        log.err("[{f}] peer send block from piece {d}, while we requested piece {d}", .{
-                            self.addr,
-                            index,
-                            self.curr_piece.?,
-                        });
+                    // if the request pipeline is empty, write again
+                    // NOTE: this might not be very efficient
+                    if (self.current_request_pipeline == 0) {
+                        try self.loop.?.writeMode(self);
                     }
                 }
             }
         }
     }
 
-    pub fn sendRequest(self: *Self, index: u32, begin: u32, length: u32) !void {
+    pub fn sendRequest(self: *Self, block: BlockRequest) !void {
         var req_payload: [12]u8 = undefined;
-        std.mem.writeInt(u32, req_payload[0..4], index, .big);
-        std.mem.writeInt(u32, req_payload[4..8], begin, .big);
-        std.mem.writeInt(u32, req_payload[8..12], length, .big);
+        std.mem.writeInt(u32, req_payload[0..4], block.index, .big);
+        std.mem.writeInt(u32, req_payload[4..8], block.begin, .big);
+        std.mem.writeInt(u32, req_payload[8..12], block.length, .big);
         _ = try self.writer.writeMessage(.{
             .id = .request,
             .payload = &req_payload,
@@ -425,6 +382,8 @@ const linux = std.os.linux;
 const Epoll = @import("Epoll.zig");
 const Message = @import("Message.zig");
 const PiecePicker = @import("PiecePicker.zig");
+const BlockRequest = PiecePicker.BlockRequest;
+const Block = PiecePicker.Block;
 const Reader = @import("Reader.zig");
 const TorrentFile = @import("TorrentFile.zig");
 const Filesystem = @import("Filesystem.zig");

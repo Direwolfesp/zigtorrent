@@ -19,6 +19,15 @@ pub const Block = struct {
     payload: []const u8,
 };
 
+pub const BlockRequest = struct {
+    /// zero-based piece index
+    index: u32,
+    /// zero-based byte offset within the piece
+    begin: u32,
+    /// block requested length
+    length: u32,
+};
+
 const PiecePos = struct {
     /// availability
     peer_count: u32 = 0,
@@ -41,7 +50,11 @@ pub const BlockState = enum(u8) {
     pending,
     /// block has been requested from the peer
     requested,
-    /// block already verified and written to disk
+    /// in disk but not verified
+    downloaded,
+    /// verifying the piece that contains this block
+    verifying,
+    /// done, block is already verified
     finished,
 };
 
@@ -108,20 +121,29 @@ pub fn deinit(self: *Self) void {
     self.downloading.deinit();
 }
 
-pub fn pickBlock(self: *Self, piece: u32, piece_len: u32) ?struct {
-    index: u32,
-    begin: u32,
-    length: u32,
-} {
+/// Picks a rare piece from the piece and a pending block from it
+pub fn pickBlock(self: *Self, peer: *const PeerConnection) !?BlockRequest {
+    const piece = try self.pickPiece(peer.peer_bitfield);
+
+    if (piece) |index| {
+        return try self.pickBlockFromPiece(index);
+    }
+
+    return null;
+}
+
+/// Picks a pending block from a given piece
+fn pickBlockFromPiece(self: *Self, piece: u32) !?BlockRequest {
     if (self.downloading.get(piece)) |dl_piece| {
-        var block_index = 0;
+        var block_index: u32 = 0;
+        const piece_len = try self.torrent.calculatePieceSize(piece);
         for (dl_piece.block_state.items) |block| {
             if (block == .pending) {
                 const begin = block_index * 0x4000;
                 return .{
                     .index = piece,
                     .begin = begin,
-                    .length = @min(0x4000, piece_len - begin),
+                    .length = @intCast(@min(0x4000, piece_len - begin)),
                 };
             }
             block_index += 1;
@@ -130,8 +152,8 @@ pub fn pickBlock(self: *Self, piece: u32, piece_len: u32) ?struct {
     return null;
 }
 
-/// Finding a rare piece for a peer:
-pub fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
+/// Finds a rare piece for a peer
+fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
     for (self.pieces.items, 0..) |piece, i| {
         // if the piece is in `pieces`, the index of the piece must match the one
         // from `piece_map`
@@ -170,6 +192,16 @@ pub fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
 pub fn markPieceCompleted(self: *Self, piece: u32) void {
     // if we didnt alredy have that piece
     if (self.piece_map.items[piece].index) |index| {
+        // debug check if the piece is not downloaded
+        if (@import("builtin").mode == .Debug) {
+            if (!self.isPieceDownloaded(piece)) {
+                @panic("A piece that didn't finished downloading was marked as completed");
+            }
+        }
+
+        // mark is as finished, its already hashed and all done
+        self.updateAllBlockStates(piece, .finished);
+
         // we grab its availability
         const avail = self.piece_map.items[piece].peer_count;
 
@@ -195,31 +227,51 @@ pub fn markPieceCompleted(self: *Self, piece: u32) void {
         // shrink bucket
         self.priority_boundaries.items[avail + 1] -= 1;
 
+        // remove the pieces from downloading and from piece map
         self.piece_map.items[piece].index = null;
-
-        if (self.downloading.get(piece)) |dl_piece| {
-            for (dl_piece.block_state.items) |block|
-                std.debug.assert(block == .finished);
-        } else log.warn("A piece ({d}) that didn't finished downloading was marked as completed", .{piece});
-
         _ = self.downloading.remove(piece);
+    } else @panic("a piece that was not in downloading was marked as completed");
+}
+
+/// Updates the BlockState for the given `block`
+/// asserts the block exists
+pub fn updateBlockState(self: *Self, piece_index: u32, block_begin: u32, state: BlockState) !void {
+    const block_index = block_begin / 0x4000;
+    const num_blocks = try self.torrent.calculateNumBlocks(piece_index);
+    if (self.downloading.get(piece_index)) |dl| {
+        std.debug.assert(num_blocks > block_index);
+        std.debug.assert(dl.block_state.items.len == num_blocks);
+        dl.block_state.items[@intCast(block_index)] = state;
+        log.debug("updated block {d} from piece {d} to {t}", .{ block_index, piece_index, state });
+    } else {
+        // first time we pick this piece,
+        // mark all blocks as pending, except the current block
+        // index (that one as state);
+        const block_state: std.ArrayList(BlockState) = try .initCapacity(self.alloc, @intCast(num_blocks));
+        var i: u32 = 0;
+        for (block_state.items) |*b_st| {
+            b_st.* = if (i == block_index) state else .pending;
+            i += 1;
+        }
+        // and add piece it to downloading
+        try self.downloading.put(piece_index, DownloadingPiece{
+            .index = piece_index,
+            .block_state = block_state,
+        });
     }
 }
 
-/// Updates the BlockState for the given `block` from `piece`.
-/// asserts the block exists
-pub fn updateBlockState(self: *Self, piece: u32, block: i64, state: BlockState) !bool {
-    if (self.downloading.get(piece)) |dl| {
-        const num_blocks = try self.torrent.calculateNumBlocks(piece);
-        std.debug.assert(num_blocks > block);
-        std.debug.assert(dl.block_state.items.len == num_blocks);
-        dl.block_state.items[@intCast(block)] = state;
-        log.debug("updated block {d} from piece {d} to {t}", .{ block, piece, state });
+///
+pub fn isPieceDownloaded(self: Self, piece: u32) bool {
+    if (self.downloading.get(piece)) |p| {
+        for (p.block_state.items) |block| {
+            if (block != .downloaded) {
+                return false;
+            }
+        }
         return true;
-    } else {
-        log.warn("Could not update block state, Piece {d} doesn't have block {d}", .{ piece, block });
-        return false;
     }
+    @panic("TODO: the piece is not downloading");
 }
 
 /// Updates all the BlockState for the given `piece`.
@@ -313,3 +365,4 @@ pub fn dec_piece_refcount(self: *Self, piece: u32) void {
 const std = @import("std");
 const log = std.log.scoped(.PiecePicker);
 const TorrentFile = @import("TorrentFile.zig");
+const PeerConnection = @import("peer.zig").PeerConnection;

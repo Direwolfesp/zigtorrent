@@ -246,12 +246,13 @@ pub const Session = struct {
             },
             // piece didn't pass the integrity check
             .integrity_failed => {
-                // TODO: maybe create a markPieceFailed
+                @panic("TODO: maybe create a markPieceFailed(io_message.index");
                 // self.picker.markPieceFailed(io_message.index);
-                self.picker.updateAllBlockStates(io_message.index, .pending);
+                // self.picker.updateAllBlockStates(io_message.index, .pending);
             },
             // all pieces have been verified succesfully
             .shutdown => self.stop(),
+            else => @panic("filesystem submitted a wrong message to the completion queue"),
         }
     }
 };

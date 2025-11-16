@@ -181,7 +181,7 @@ pub fn processTask(self: *Self) !void {
 pub fn writeBlock(self: Self, block: Block) void {
     // global byte offsets of the block within the logical file
     const write_start: i64 = block.index * self.torr.info.piece_length + block.begin;
-    const write_end: i64 = write_start + block.payload.len;
+    const write_end: i64 = write_start + @as(i64, @intCast(block.payload.len));
 
     var left = block.payload.len;
     var start_offset: i64 = 0;
@@ -217,7 +217,7 @@ pub fn writeBlock(self: Self, block: Block) void {
 /// Calculates SHA1 hash on the mmaped piece,
 /// returns true on success, false on fail
 fn checkIntegrity(self: *Self, piece_index: u32) !bool {
-    const piece_len = self.torr.calculatePieceSize(piece_index);
+    const piece_len = try self.torr.calculatePieceSize(piece_index);
     const hash_start: i64 = piece_index * self.torr.info.piece_length;
     const hash_end: i64 = hash_start + piece_len;
 
@@ -236,15 +236,15 @@ fn checkIntegrity(self: *Self, piece_index: u32) !bool {
             continue;
 
         const file_offset: usize = @intCast(region_start - file_start_offset);
-        const payload_len: usize = region_end - region_start;
+        const payload_len: usize = @intCast(region_end - region_start);
         sha1.update(file.mmap_file[file_offset .. file_offset + payload_len]);
 
-        left -= payload_len;
+        left -= @intCast(payload_len);
         if (left == 0) break;
     }
 
     std.debug.assert(left == 0);
-    return std.mem.eql(u8, sha1.finalResult(), self.torr.info.pieces[piece_index]);
+    return std.mem.eql(u8, &sha1.finalResult(), &self.torr.info.pieces[piece_index]);
 }
 
 /// It makes sure the file/files
