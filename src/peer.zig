@@ -214,7 +214,10 @@ pub const PeerConnection = struct {
                         _ = try self.man.picker.updateBlockState(b.index, b.begin, .requested);
                         self.current_request_pipeline += 1;
                     } else {
+                        // TODO: this should not trigger
                         log.warn("[{f}] request: could not pick block", .{self.addr});
+                        std.process.exit(0);
+                        break;
                     }
                 }
                 // wait for piece
