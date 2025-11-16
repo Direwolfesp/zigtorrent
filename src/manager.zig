@@ -5,7 +5,7 @@
 pub const Session = struct {
     alloc: std.mem.Allocator,
 
-    peer_id: [20]u8,
+    peer_id: [20]u8 = undefined,
 
     torrent: TorrentFile.TorrentManaged,
 
@@ -20,9 +20,7 @@ pub const Session = struct {
     // socketfd -> *Peer
     peers: std.AutoHashMapUnmanaged(u64, *PeerConnection),
 
-    running: bool,
-
-    stop_signal: std.atomic.Value(bool),
+    running: bool = false,
 
     const Self = @This();
 
@@ -34,7 +32,6 @@ pub const Session = struct {
         errdefer t.deinit(alloc);
 
         var ret = Self{
-            .peer_id = undefined,
             .alloc = alloc,
             .torrent = t,
             .tracker = undefined,
@@ -42,8 +39,6 @@ pub const Session = struct {
             .picker = undefined,
             .epoll = try Epoll.init(),
             .peers = .empty,
-            .running = false,
-            .stop_signal = .init(false),
         };
 
         // initialize rest of the modules
@@ -77,8 +72,6 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.stop_signal.store(true, .seq_cst);
-
         // Close peers
         var it = self.peers.iterator();
         while (it.next()) |entry| {
@@ -126,7 +119,6 @@ pub const Session = struct {
         if (peer_list.len == 0) return error.NoPeersFound;
 
         // epoll uses 128 max so its appropiate
-        // TEMP: I put 2 for testing
         const max_concurrent: usize = @intCast(@min(128, peer_list.len));
         var tried: usize = 0;
         var connected: usize = 0;
@@ -194,20 +186,17 @@ pub const Session = struct {
     }
 
     /// Main loop. This pumps epoll and the filesystem completion queue.
-    /// It returns when stop() is called (sets stop_signal) or on fatal error.
+    /// It returns when stop() is called or on fatal error.
     pub fn run(self: *Self) !void {
         // try to spawn filesystem thread
         const fs_thread = try std.Thread.spawn(.{}, Filesystem.processTask, .{&self.fs});
         defer fs_thread.join();
 
         try self.connectToPeers();
-
         self.running = true;
         const poll_timeout_ms = 100;
 
-        while (true) {
-            if (self.stop_signal.load(.seq_cst) or self.peers.count() == 0) break;
-
+        while (self.running) {
             const events = self.epoll.wait(poll_timeout_ms);
             for (events) |r| {
                 const peer: *PeerConnection = @ptrFromInt(r.data.ptr);
@@ -235,15 +224,35 @@ pub const Session = struct {
 
             // process fs competions
             while (self.fs.receive()) |io_msg| {
-                log.info("Processing disk_io message", .{});
-                io_msg.sender.onIOMessage(io_msg);
+                log.info("Processing disk_io message: {t}", .{io_msg.status});
+                self.onIOMessage(io_msg);
             }
         }
+    }
+
+    /// for now, it simply stops the `run()` loop
+    pub fn stop(self: *Self) void {
+        log.info("stopping manager...", .{});
         self.running = false;
     }
 
-    pub fn stop(self: *Self) void {
-        self.stop_signal.store(true, .SeqCst);
+    /// callback to handle the io_message from the completion queue.
+    pub fn onIOMessage(self: *Self, io_message: IOMessage) void {
+        switch (io_message.status) {
+            // The piece has been verified and finished
+            .piece_completed => {
+                self.picker.markPieceCompleted(io_message.index);
+                self.tracker.onDownload(@intCast(self.torrent.meta.calculatePieceSize(io_message.index) catch 0));
+            },
+            // piece didn't pass the integrity check
+            .integrity_failed => {
+                // TODO: maybe create a markPieceFailed
+                // self.picker.markPieceFailed(io_message.index);
+                self.picker.updateAllBlockStates(io_message.index, .pending);
+            },
+            // all pieces have been verified succesfully
+            .shutdown => self.stop(),
+        }
     }
 };
 
@@ -254,6 +263,7 @@ const linux = std.os.linux;
 
 const Epoll = @import("Epoll.zig");
 const Filesystem = @import("Filesystem.zig");
+const IOMessage = Filesystem.IOMessage;
 const PeerConnection = @import("peer.zig").PeerConnection;
 const PiecePicker = @import("PiecePicker.zig");
 const TorrentFile = @import("TorrentFile.zig");

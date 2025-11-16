@@ -37,7 +37,7 @@ pub fn writeHandshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile)
     const handshake_bytes: []const u8 = std.mem.asBytes(&handshk);
     const handshake_len = handshake_bytes.len;
 
-    std.debug.assert(handshake_len == 68);
+    std.debug.assert(handshake_len == Message.HANDSHAKE_LEN);
     if (handshake_bytes.len > self.write_buf.len) return Error.BufferTooSmall;
 
     @memmove(self.write_buf[0..handshake_len], handshake_bytes);

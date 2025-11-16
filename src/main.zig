@@ -37,8 +37,6 @@ pub fn main() !void {
 
 test {
     _ = std.testing.refAllDecls(@This());
-    _ = Message;
-    _ = Filesystem;
 }
 
 const log = std.log.scoped(.main);
@@ -48,9 +46,4 @@ const assert = std.debug.assert;
 const builtin = @import("builtin");
 
 const logger = @import("tests/logger.zig");
-const bencode = @import("bencode.zig");
-const Message = @import("Message.zig");
-const TorrentFile = @import("TorrentFile.zig");
-const Tracker = @import("Tracker.zig");
-const Filesystem = @import("Filesystem.zig");
 const manager = @import("manager.zig");

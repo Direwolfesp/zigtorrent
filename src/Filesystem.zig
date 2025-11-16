@@ -45,32 +45,25 @@
 //!          |         |         |         |
 //!          + --------+---------+-------- +
 //!
-//! TODO: How do we manage the buffers passed between network thread and
-//! filesystem thread?? Currently, if you submit a buffer to write, the network
-//! thread cannot safetely reuse that buffer for other piece...
-//! see https://www.libtorrent.org/features-ref.html#disk-i-o
 
 const Self = @This();
 
 pub const IOAction = enum {
-    /// The piece has been written to disk succesfully
-    store_success,
-    /// Tells it wants to write the downloaded piece to disk
-    request_store,
-    /// Used to comunicate to the filesystem thread to stop all activity
+    /// The piece needs to be checked
+    check_integrity,
+    /// The piece has been verified and finished
+    piece_completed,
+    /// The filesystem thread should send this message to the network thread when
+    /// all pieces have been verified succesfully for a clean shutdown.
     shutdown,
-    /// piece didnt pass the integrity check
+    /// piece didn't pass the integrity check
     integrity_failed,
-    /// other fs error
-    write_failed,
 };
 
 pub const IOMessage = struct {
     status: IOAction,
     /// piece index
     index: u32,
-    /// piece contents
-    payload: []const u8,
     /// client who submitted this message
     sender: *PeerConnection,
 };
@@ -91,6 +84,8 @@ torr: *const TorrentFile,
 /// file structure of the torrent. Files have the same order as they appear in the metainfo.
 /// Directories are omitted
 files: std.ArrayList(FileInfo),
+/// Keeps track of how many pieces did it hash already
+count: usize = 0,
 /// disk requests are stored here
 submission_queue: MessageQueue,
 /// written pieces are notified back here to the client
@@ -123,17 +118,15 @@ pub fn deinit(self: *Self) void {
 
 /// Add a message to the queue. Blocks if full
 pub fn submit(self: *Self, task: IOMessage) !void {
-    std.debug.assert(task.payload.len <= self.torr.info.piece_length);
-    log.info("got a new submission: state = {t}, piece = {d}", .{ task.status, task.index });
-    self.submission_queue.push(.{
+    log.info("got a new submission: action = {t}, piece = {d}", .{ task.status, task.index });
+    self.submission_queue.push(IOMessage{
         .status = task.status,
         .index = task.index,
-        .payload = try self.alloc.dupe(u8, task.payload),
         .sender = task.sender,
     });
 }
 
-// Pop from completion queue, null if empty
+/// Pop from completion queue, null if empty
 pub fn receive(self: *Self) ?IOMessage {
     if (self.completion_queue.front()) |ret| {
         defer self.completion_queue.pop();
@@ -145,9 +138,8 @@ pub fn receive(self: *Self) ?IOMessage {
 /// Pop's from the submission queue and
 /// processes the task, which consists of:
 /// - checking piece integrity
-/// - writing it to disk
-/// Once is done, push message to completion
-/// queue, otherwise mark it as incomplete.
+/// - notifying back the result
+/// - keep count of hashed pieces
 pub fn processTask(self: *Self) !void {
     log.info("Spawned filesystem main loop...", .{});
 
@@ -156,80 +148,103 @@ pub fn processTask(self: *Self) !void {
             std.Thread.sleep(30 * std.time.ns_per_ms);
             continue;
         };
-        self.submission_queue.pop();
-        defer self.alloc.free(task.payload);
 
+        self.submission_queue.pop();
         log.info("Processing task with id: {t}", .{task.status});
 
         switch (task.status) {
-            .request_store => {
+            .check_integrity => {
                 defer self.completion_queue.push(task.*);
-                if (!try self.checkIntegrity(task)) {
-                    log.warn("Piece #{d} failed integrity check.", .{task.index});
+
+                if (try self.checkIntegrity(task.index)) {
+                    log.debug("Piece #{d} verified successfully", .{task.index});
+                    task.status = .piece_completed;
+                    self.count += 1;
+
+                    // if we hashed all pieces, notify the main thread we
+                    // want to shutdown
+                    if (self.count == self.torr.getNumPieces()) {
+                        task.status = .shutdown;
+                        break;
+                    }
+                } else {
                     task.status = .integrity_failed;
-                    continue;
+                    log.warn("Piece #{d} failed integrity check", .{task.index});
                 }
-                self.writePiece(task.*) catch |err| {
-                    log.err("Could not write piece #{d}. Error: {t}", .{ task.index, err });
-                    task.status = .write_failed;
-                    continue;
-                };
-                log.info("Piece #{d} stored successfully", .{task.index});
-                task.status = .store_success;
             },
-            .shutdown => break,
-            else => unreachable,
+            else => @panic("got unhandled submission"),
         }
     }
 }
 
-/// Attempts to write piece content to the corresponding file(s).
-/// In case of failure, caller might want to update the `task` status
-/// to something appropiate.
-fn writePiece(self: Self, task: IOMessage) !void {
-    std.debug.assert(try self.torr.calculatePieceSize(task.index) == task.payload.len);
+/// Write the given block to the mmaped memory
+pub fn writeBlock(self: Self, block: Block) void {
+    // global byte offsets of the block within the logical file
+    const write_start: i64 = block.index * self.torr.info.piece_length + block.begin;
+    const write_end: i64 = write_start + block.payload.len;
 
-    // global byte offsets of the piece within the logical file
-    const write_start: i64 = task.index * self.torr.info.piece_length;
-    const write_end: i64 = write_start + @as(i64, @intCast(task.payload.len));
+    var left = block.payload.len;
+    var start_offset: i64 = 0;
 
-    var left = task.payload.len; // number of bytes to be written
-    var file_start_offset: i64 = 0; // starting byte of the current file
+    for (self.files.items) |file| {
+        defer start_offset = file.end_offset;
 
-    for (self.files.items) |*file| {
-        defer file_start_offset = file.end_offset;
-
-        const region_start: i64 = @max(write_start, file_start_offset);
+        // safe to write region inside the file
+        const region_start: i64 = @max(write_start, start_offset);
         const region_end: i64 = @min(write_end, file.end_offset);
 
-        // piece is another file
+        // block is another file
         if (region_end <= region_start)
             continue;
 
-        const file_offset: usize = @intCast(region_start - file_start_offset);
+        const file_offset: usize = @intCast(region_start - start_offset);
         const payload_start: usize = @intCast(region_start - write_start);
         const payload_end: usize = @intCast(region_end - write_start);
+        const written_len = payload_end - payload_start;
 
         @memcpy(
-            file.mmap_file[file_offset .. file_offset + (payload_end - payload_start)],
-            task.payload[payload_start..payload_end],
+            file.mmap_file[file_offset .. file_offset + written_len],
+            block.payload[payload_start..payload_end],
         );
 
-        left -= payload_end - payload_start;
+        left -= written_len;
         if (left == 0) break;
     }
 
     std.debug.assert(left == 0);
 }
 
-/// Calculates SHA1 on the piece payload
-fn checkIntegrity(self: *Self, task: *const IOMessage) !bool {
-    const piece_size: usize = @intCast(try self.torr.calculatePieceSize(@intCast(task.index)));
-    std.debug.assert(piece_size == task.payload.len);
-    std.debug.assert(task.status == .request_store);
-    var result: [Sha1.digest_length]u8 = undefined;
-    Sha1.hash(task.payload, &result, .{});
-    return std.mem.eql(u8, &result, &self.torr.info.pieces[task.index]);
+/// Calculates SHA1 hash on the mmaped piece,
+/// returns true on success, false on fail
+fn checkIntegrity(self: *Self, piece_index: u32) !bool {
+    const piece_len = self.torr.calculatePieceSize(piece_index);
+    const hash_start: i64 = piece_index * self.torr.info.piece_length;
+    const hash_end: i64 = hash_start + piece_len;
+
+    var sha1 = Sha1.init(.{});
+    var left = piece_len; // number of bytes to be hased
+    var file_start_offset: i64 = 0; // starting byte of the current file
+
+    for (self.files.items) |*file| {
+        defer file_start_offset = file.end_offset;
+
+        const region_start: i64 = @max(hash_start, file_start_offset);
+        const region_end: i64 = @min(hash_end, file.end_offset);
+
+        // hash region is in other file
+        if (region_end <= region_start)
+            continue;
+
+        const file_offset: usize = @intCast(region_start - file_start_offset);
+        const payload_len: usize = region_end - region_start;
+        sha1.update(file.mmap_file[file_offset .. file_offset + payload_len]);
+
+        left -= payload_len;
+        if (left == 0) break;
+    }
+
+    std.debug.assert(left == 0);
+    return std.mem.eql(u8, sha1.finalResult(), self.torr.info.pieces[piece_index]);
 }
 
 /// It makes sure the file/files
@@ -376,6 +391,7 @@ const Sha1 = std.crypto.hash.Sha1;
 const testing = std.testing;
 
 const spsc = @import("spsc_queue");
+const Block = @import("PiecePicker.zig").Block;
 const TorrentFile = @import("TorrentFile.zig");
 const PeerConnection = @import("peer.zig").PeerConnection;
 const MessageQueue = spsc.SpscQueueUnmanaged(IOMessage, false);

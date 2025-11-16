@@ -251,13 +251,12 @@ fn parseResponse(
     self.peers = parsed_peers;
 }
 
-pub fn onDownload(self: *const Tracker, bytes: i64) void {
-    self.downloaded += bytes;
-    self.left -|= bytes;
+pub fn onDownload(self: *Tracker, bytes: i64) void {
+    self.downloaded += @intCast(bytes);
+    self.left -|= @intCast(bytes);
 
     if (self.left == 0 and self.state == .in_progress) {
         self.state = .completed;
-        log.info("Downloaded completed. State = completed", .{});
     }
 }
 

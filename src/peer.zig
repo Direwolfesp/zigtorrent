@@ -320,20 +320,6 @@ pub const PeerConnection = struct {
         }
     }
 
-    /// callback to handle the io_message from the completion queue.
-    pub fn onIOMessage(self: *Self, io_message: Filesystem.IOMessage) void {
-        switch (io_message.status) {
-            .store_success => {
-                self.man.picker.updateAllBlockStates(io_message.index, .finished);
-                self.man.picker.markPieceCompleted(io_message.index);
-            },
-            .integrity_failed, .write_failed => {
-                self.man.picker.updateAllBlockStates(io_message.index, .pending);
-            },
-            else => {},
-        }
-    }
-
     pub fn sendRequest(self: *Self, index: u32, begin: u32, length: u32) !void {
         var req_payload: [12]u8 = undefined;
         std.mem.writeInt(u32, req_payload[0..4], index, .big);

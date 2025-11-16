@@ -10,6 +10,15 @@
 
 const Self = @This();
 
+pub const Block = struct {
+    /// zero-based piece index
+    index: u32,
+    /// zero-based byte offset within the piece
+    begin: u32,
+    /// block data, it shoud have the correct length
+    payload: []const u8,
+};
+
 const PiecePos = struct {
     /// availability
     peer_count: u32 = 0,
@@ -99,6 +108,28 @@ pub fn deinit(self: *Self) void {
     self.downloading.deinit();
 }
 
+pub fn pickBlock(self: *Self, piece: u32, piece_len: u32) ?struct {
+    index: u32,
+    begin: u32,
+    length: u32,
+} {
+    if (self.downloading.get(piece)) |dl_piece| {
+        var block_index = 0;
+        for (dl_piece.block_state.items) |block| {
+            if (block == .pending) {
+                const begin = block_index * 0x4000;
+                return .{
+                    .index = piece,
+                    .begin = begin,
+                    .length = @min(0x4000, piece_len - begin),
+                };
+            }
+            block_index += 1;
+        }
+    }
+    return null;
+}
+
 /// Finding a rare piece for a peer:
 pub fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
     for (self.pieces.items, 0..) |piece, i| {
@@ -123,12 +154,12 @@ pub fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
                 block_state.appendNTimesAssumeCapacity(.pending, @intCast(num_blocks));
 
                 try self.downloading.put(piece, DownloadingPiece{
-                    .index = @intCast(i),
+                    .index = @intCast(piece),
                     .block_state = block_state,
                 });
                 self.piece_map.items[piece].state = true;
-                return piece;
             }
+            return piece;
         }
     }
     log.warn("Couldn't pick a piece", .{});
