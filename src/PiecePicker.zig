@@ -129,6 +129,7 @@ pub fn pickBlock(self: *Self, peer: *const PeerConnection) !?BlockRequest {
         return try self.pickBlockFromPiece(index);
     }
 
+    // TODO: handle when this returns null
     return null;
 }
 
@@ -180,8 +181,13 @@ fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
                     .block_state = block_state,
                 });
                 self.piece_map.items[piece].state = true;
+                self.piece_map.items[piece].index = @intCast(i);
             }
-            return piece;
+
+            // only return if the piece has some remaining blocks
+            // to download. O(N)
+            if (!self.isPieceDownloaded(piece))
+                return piece;
         }
     }
     log.warn("Couldn't pick a piece", .{});

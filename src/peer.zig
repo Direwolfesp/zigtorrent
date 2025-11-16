@@ -214,9 +214,8 @@ pub const PeerConnection = struct {
                         _ = try self.man.picker.updateBlockState(b.index, b.begin, .requested);
                         self.current_request_pipeline += 1;
                     } else {
-                        // TODO: this should not trigger
+                        // TODO: do something more usefull
                         log.warn("[{f}] request: could not pick block", .{self.addr});
-                        std.process.exit(0);
                         break;
                     }
                 }
@@ -249,7 +248,10 @@ pub const PeerConnection = struct {
                         .begin = std.mem.readInt(u32, msg.payload.?[4..8], .big),
                         .payload = msg.payload.?[8..],
                     };
-                    log.debug("[{f}] peer sent piece: {any}", .{ self.addr, block });
+                    log.debug(
+                        "[{f}] peer sent piece: {{ .index = {d}, .begin = {d}}}",
+                        .{ self.addr, block.index, block.begin },
+                    );
 
                     self.current_request_pipeline -= 1;
 
