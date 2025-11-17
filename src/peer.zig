@@ -80,10 +80,6 @@ pub const PeerConnection = struct {
     }
 
     pub fn deinit(self: *Self, alloc: std.mem.Allocator) !void {
-        if (self.loop) |epoll| {
-            try epoll.removeClient(self);
-        }
-
         if (self.socket != -1) {
             std.posix.close(self.socket);
             self.socket = -1;
