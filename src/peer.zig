@@ -80,14 +80,18 @@ pub const PeerConnection = struct {
     }
 
     pub fn deinit(self: *Self, alloc: std.mem.Allocator) !void {
+        if (self.loop) |epoll| {
+            try epoll.removeClient(self);
+        }
+
+        if (self.socket != -1) {
+            std.posix.close(self.socket);
+            self.socket = -1;
+        }
+
         self.reader.deinit(alloc);
         self.writer.deinit(alloc);
-
-        // self.man.picker.unregister_peer_pieces(self.peer_bitfield);
         self.peer_bitfield.deinit(alloc);
-
-        if (self.socket != -1)
-            std.posix.close(self.socket);
     }
 
     pub fn parseBitfield(self: *Self, bitfield: Message) !void {

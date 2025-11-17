@@ -255,12 +255,10 @@ pub fn updateBlockState(self: *Self, piece_index: u32, block_begin: u32, state: 
         // first time we pick this piece,
         // mark all blocks as pending, except the current block
         // index (that one as state);
-        const block_state: std.ArrayList(BlockState) = try .initCapacity(self.alloc, @intCast(num_blocks));
-        var i: u32 = 0;
-        for (block_state.items) |*b_st| {
-            b_st.* = if (i == block_index) state else .pending;
-            i += 1;
-        }
+        var block_state: std.ArrayList(BlockState) = try .initCapacity(self.alloc, @intCast(num_blocks));
+        block_state.appendNTimesAssumeCapacity(.pending, @intCast(num_blocks));
+        block_state.items[block_index] = state;
+
         // and add piece it to downloading
         try self.downloading.put(piece_index, DownloadingPiece{
             .index = piece_index,

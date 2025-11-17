@@ -161,7 +161,7 @@ pub const Session = struct {
 
                 // deinit peer
                 p.deinit(self.alloc) catch |deinit_err| {
-                    log.err("[{f}] error deinit after connect failure: {t}", .{ tracker_peer.addr, deinit_err });
+                    log.err("[{f}] error deinit after connect failure: {t}", .{ tracker_peer, deinit_err });
                 };
                 self.alloc.destroy(p);
                 tried += 1;
@@ -227,9 +227,8 @@ pub const Session = struct {
                 }
             }
 
-            // process fs competions
-            while (self.fs.receive()) |io_msg| {
-                log.info("Processing disk_io message: {t}", .{io_msg.status});
+            // process a fs completion
+            if (self.fs.receive()) |io_msg| {
                 self.onIOMessage(io_msg);
             }
         }
@@ -246,6 +245,7 @@ pub const Session = struct {
         switch (io_message.status) {
             // The piece has been verified and finished
             .piece_completed => {
+                log.info("Downloaded piece #{d}\n", .{io_message.index});
                 self.picker.markPieceCompleted(io_message.index);
                 self.tracker.onDownload(@intCast(self.torrent.meta.calculatePieceSize(io_message.index) catch 0));
             },
