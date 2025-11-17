@@ -82,13 +82,18 @@ pub const Session = struct {
             peer.deinit(self.alloc) catch |err| {
                 log.err("[{f}] Error while deinitializating peer: {t} ", .{ peer.addr, err });
             };
+            self.alloc.destroy(peer);
         }
+
+        self.torrent.deinit(self.alloc);
 
         self.peers.deinit(self.alloc);
 
         self.fs.deinit();
 
         self.tracker.deinit(self.alloc);
+
+        self.picker.deinit();
 
         self.epoll.deinit();
     }

@@ -83,7 +83,7 @@ pub const PeerConnection = struct {
         self.reader.deinit(alloc);
         self.writer.deinit(alloc);
 
-        self.man.picker.unregister_peer_pieces(self.peer_bitfield);
+        // self.man.picker.unregister_peer_pieces(self.peer_bitfield);
         self.peer_bitfield.deinit(alloc);
 
         if (self.socket != -1)

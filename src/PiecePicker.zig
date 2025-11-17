@@ -161,10 +161,6 @@ fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
         std.debug.assert(self.piece_map.items[piece].index.? == i);
 
         // Only pick pieces that the peer have
-        // and that they havent already been picked.
-        // NOTE: maybe we should pick pieces that have been already picked by
-        // other connections but just requesting blocks that have not been requested.
-        // basically separating the piece picking from block picking logic.
         if (have.isSet(piece)) {
             // Once we have the piece, we either look-up the `DownloadingPiece`
             // object, or create a new one (and update the state in `piece_map` by
@@ -234,6 +230,7 @@ pub fn markPieceCompleted(self: *Self, piece: u32) void {
         self.priority_boundaries.items[avail + 1] -= 1;
 
         // remove the pieces from downloading and from piece map
+        _ = self.pieces.pop();
         self.piece_map.items[piece].index = null;
         _ = self.downloading.remove(piece);
     } else @panic("a piece that was not in downloading was marked as completed");
@@ -248,7 +245,7 @@ pub fn updateBlockState(self: *Self, piece_index: u32, block_begin: u32, state: 
         std.debug.assert(num_blocks > block_index);
         std.debug.assert(dl.block_state.items.len == num_blocks);
         dl.block_state.items[@intCast(block_index)] = state;
-        log.debug("updated block {d} from piece {d} to {t}", .{ block_index, piece_index, state });
+        log.debug("updated block {d} (out of {d}) from piece {d} to {t}", .{ block_index, dl.block_state.items.len, piece_index, state });
     } else {
         // first time we pick this piece,
         // mark all blocks as pending, except the current block
@@ -267,11 +264,12 @@ pub fn updateBlockState(self: *Self, piece_index: u32, block_begin: u32, state: 
     }
 }
 
-///
+/// A piece is not downloaded if a block is pending or
+/// requested.
 pub fn isPieceDownloaded(self: Self, piece: u32) bool {
     if (self.downloading.get(piece)) |p| {
         for (p.block_state.items) |block| {
-            if (block != .downloaded) {
+            if (block == .pending or block == .requested) {
                 return false;
             }
         }
