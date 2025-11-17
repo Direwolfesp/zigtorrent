@@ -232,6 +232,11 @@ pub fn markPieceCompleted(self: *Self, piece: u32) void {
         // remove the pieces from downloading and from piece map
         _ = self.pieces.pop();
         self.piece_map.items[piece].index = null;
+
+        // deinit blocks
+        var downloadingpiece = self.downloading.get(piece).?;
+        downloadingpiece.block_state.deinit(self.alloc);
+        // remove from hashmap
         _ = self.downloading.remove(piece);
     } else @panic("a piece that was not in downloading was marked as completed");
 }
