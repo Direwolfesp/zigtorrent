@@ -118,7 +118,7 @@ pub fn deinit(self: *Self) void {
 
 /// Add a message to the queue. Blocks if full
 pub fn submit(self: *Self, task: IOMessage) !void {
-    log.info("got a new submission: action = {t}, piece = {d}", .{ task.status, task.index });
+    log.debug("got a new submission: action = {t}, piece = {d}", .{ task.status, task.index });
     self.submission_queue.push(IOMessage{
         .status = task.status,
         .index = task.index,
@@ -144,17 +144,17 @@ pub fn processTask(self: *Self) !void {
     log.info("Spawned filesystem main loop...", .{});
 
     while (true) {
-        const task: *IOMessage = self.submission_queue.front() orelse {
+        var task: IOMessage = (self.submission_queue.front() orelse {
             std.Thread.sleep(30 * std.time.ns_per_ms);
             continue;
-        };
-
+        }).*;
         self.submission_queue.pop();
-        log.info("Processing task with id: {t}", .{task.status});
+
+        log.debug("Processing task with id: {t}", .{task.status});
 
         switch (task.status) {
             .check_integrity => {
-                defer self.completion_queue.push(task.*);
+                defer self.completion_queue.push(task);
 
                 if (try self.checkIntegrity(task.index)) {
                     log.debug("Piece #{d} verified successfully", .{task.index});

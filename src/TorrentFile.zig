@@ -269,11 +269,18 @@ pub fn calculateNumBlocks(self: *const TorrentFile, piece: usize) !i64 {
 /// the last index might get a piece smaller than the other pieces
 /// this is only necesary one per piece
 pub fn calculatePieceSize(self: *const TorrentFile, index: usize) !i64 {
-    const num_whole_pieces = try std.math.divFloor(
+    const num_whole_pieces = std.math.divFloor(
         i64,
         self.download_size,
         self.info.piece_length,
-    );
+    ) catch |err| switch (err) {
+        // FIXME: piece_length is getting corrupted somehow
+        error.DivisionByZero => {
+            log.err("division by zero: denominator {d}", .{self.info.piece_length});
+            std.process.exit(0);
+        },
+        else => return err,
+    };
     std.debug.assert(index >= 0 and index <= num_whole_pieces);
     return if (index < num_whole_pieces)
         self.info.piece_length
