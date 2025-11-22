@@ -24,26 +24,10 @@ pub fn wait(self: *Epoll, timeout_ms: i32) []linux.epoll_event {
     return self.ready_list[0..count];
 }
 
-pub fn readMode(self: Epoll, client: *PeerConnection) !void {
-    var event = linux.epoll_event{
-        .events = linux.EPOLL.IN,
-        .data = .{ .ptr = @intFromPtr(client) },
-    };
-    try std.posix.epoll_ctl(self.efd, linux.EPOLL.CTL_MOD, client.socket, &event);
-}
-
-pub fn writeMode(self: Epoll, client: *PeerConnection) !void {
-    var event = linux.epoll_event{
-        .events = linux.EPOLL.OUT,
-        .data = .{ .ptr = @intFromPtr(client) },
-    };
-    try std.posix.epoll_ctl(self.efd, linux.EPOLL.CTL_MOD, client.socket, &event);
-}
-
 pub fn newClient(self: Epoll, client: *PeerConnection) !void {
     var event = linux.epoll_event{
-        .events = linux.EPOLL.OUT,
-        .data = .{ .ptr = @intFromPtr(client) },
+        .events = linux.EPOLL.IN | linux.EPOLL.OUT,
+        .data = .{ .fd = client.socket },
     };
     try std.posix.epoll_ctl(self.efd, linux.EPOLL.CTL_ADD, client.socket, &event);
 }

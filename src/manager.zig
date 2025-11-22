@@ -79,9 +79,7 @@ pub const Session = struct {
             self.epoll.removeClient(peer) catch |err| {
                 log.err("[{f}] Error while removing peer from eloop: {t} ", .{ peer.addr, err });
             };
-            peer.deinit(self.alloc) catch |err| {
-                log.err("[{f}] Error while deinitializating peer: {t} ", .{ peer.addr, err });
-            };
+            peer.deinit(self.alloc);
             self.alloc.destroy(peer);
         }
 
@@ -108,15 +106,17 @@ pub const Session = struct {
     pub fn removePeer(self: *Self, peer: *PeerConnection) !void {
         const fd_key: u64 = @intCast(peer.socket);
 
-        // we already do this in peer.deinit()
         _ = self.peers.remove(fd_key);
         try self.epoll.removeClient(peer);
 
-        peer.deinit(self.alloc) catch |err| {
-            log.err("peer.deinit failed: {t}", .{err});
-            return;
-        };
+        peer.deinit(self.alloc);
+        self.alloc.destroy(peer);
         log.info("{f} peer removed from session.", .{peer.addr});
+
+        if (self.peers.capacity() == 0) {
+            log.info("{f} Peer count is 0, attempting to connecto to peers", .{peer.addr});
+            try self.connectToPeers();
+        }
     }
 
     pub fn connectToPeers(self: *Self) !void {
@@ -124,47 +124,39 @@ pub const Session = struct {
         if (peer_list.len == 0) return error.NoPeersFound;
 
         // epoll uses 128 max so its appropiate
-        const max_concurrent: usize = @intCast(@min(128, peer_list.len));
+        const max_clients: usize = @intCast(@min(128, peer_list.len));
+
+        // iterate peers and connect, wrap around if neeeded.
+        var i: usize = @as(usize, @intCast(std.time.nanoTimestamp())) % peer_list.len;
         var tried: usize = 0;
         var connected: usize = 0;
 
-        var start_index: usize = 0;
-        // random starting index
-        if (peer_list.len > 1)
-            start_index = @as(usize, @intCast(std.time.nanoTimestamp())) % peer_list.len;
-
-        // iterate peers and connect, wrap around if neeeded.
-        var i: usize = start_index;
-        while (tried < peer_list.len and connected < max_concurrent) : (i = (i + 1) % peer_list.len) {
-            const tracker_peer = peer_list[i];
-
+        while (tried < peer_list.len and connected < max_clients) : ({
+            i = (i + 1) % peer_list.len;
+            tried += 1;
+        }) {
+            const peer_addr = peer_list[i];
             var p = try self.alloc.create(PeerConnection);
+            errdefer self.alloc.destroy(p);
 
-            const init_result = PeerConnection.init(
+            p.* = PeerConnection.init(
                 self.alloc,
-                .{ .in = tracker_peer },
+                .{ .in = peer_addr },
                 self.torrent.meta.getNumPieces(),
                 self,
                 PeerConnection.DEFAULT_WRITE_BUF,
                 PeerConnection.DEFAULT_READ_BUF,
             ) catch |err| {
-                log.err("Error initializing peer with address {f}: {t}", .{ tracker_peer, err });
+                log.err("Error initializing peer with address {f}: {t}", .{ peer_addr, err });
                 self.alloc.destroy(p);
-                tried += 1;
                 continue;
             };
-            p.* = init_result;
 
             // Attempt to connect
             p.connect(&self.epoll) catch |err| {
                 log.err("[{f}] Connect error: {t}", .{ p.addr, err });
-
-                // deinit peer
-                p.deinit(self.alloc) catch |deinit_err| {
-                    log.err("[{f}] error deinit after connect failure: {t}", .{ tracker_peer, deinit_err });
-                };
+                p.deinit(self.alloc);
                 self.alloc.destroy(p);
-                tried += 1;
                 continue;
             };
 
@@ -172,19 +164,17 @@ pub const Session = struct {
             self.addPeer(p) catch |err| {
                 log.err("Error while registering peer to event loop: {t}", .{err});
                 self.epoll.removeClient(p) catch |rem_err| {
-                    log.err("[{f}] removeClient failed during cleanup: {t}", .{ p.addr, rem_err });
-                    p.deinit(self.alloc) catch |deinit_err| {
-                        log.err("[{f}] deinit after map put failure: {t}", .{ p.addr, deinit_err });
-                    };
+                    log.err("[{f}] removeClient failed during cleanup: {t}", .{
+                        p.addr,
+                        rem_err,
+                    });
+                    p.deinit(self.alloc);
                     self.alloc.destroy(p);
-                    tried += 1;
                     continue;
                 };
             };
 
-            // success:
             connected += 1;
-            tried += 1;
         }
 
         log.info("attempted to connect with {d} peers, connected {d}", .{ tried, connected });
@@ -199,31 +189,46 @@ pub const Session = struct {
 
         try self.connectToPeers();
         self.running = true;
-        const poll_timeout_ms = 100;
+        const poll_timeout_ms = 0;
 
         while (self.running) {
             const events = self.epoll.wait(poll_timeout_ms);
+            // log.info(
+            //     \\connected peers = {d}
+            //     \\epoll wait returned {d} events
+            //     \\
+            // , .{
+            //     self.peers.size,
+            //     events.len,
+            // });
             for (events) |r| {
-                const peer: *PeerConnection = @ptrFromInt(r.data.ptr);
+                const socket_fd: u64 = @intCast(r.data.fd);
+                const peer: *PeerConnection = self.peers.get(socket_fd).?;
 
                 if ((r.events & (linux.EPOLL.HUP | linux.EPOLL.ERR)) != 0) {
-                    log.warn("[{f}] epoll failed, this socket might have been closed. Disconnecting peer...", .{peer.addr});
+                    log.warn("[{f}] epoll HUP or ERR, this socket might have been closed. Disconnecting peer...", .{peer.addr});
                     _ = try self.removePeer(peer);
                     continue;
                 }
 
                 if ((r.events & linux.EPOLL.IN) != 0) {
-                    peer.handle_read(self.alloc) catch |err| {
-                        log.err("[{f}] peer.handle_read error: {t}", .{ peer.addr, err });
-                        _ = try self.removePeer(peer);
-                        continue;
-                    };
-                } else if ((r.events & linux.EPOLL.OUT) != 0) {
-                    peer.handle_write(self.alloc) catch |err| {
-                        log.err("[{f}] peer.handle_write error: {t}", .{ peer.addr, err });
-                        _ = try self.removePeer(peer);
-                        continue;
-                    };
+                    if (peer.session.wants_to == .READ) {
+                        peer.handle_read(self.alloc) catch |err| {
+                            log.err("[{f}] handle read error: {t}", .{ peer.addr, err });
+                            _ = try self.removePeer(peer);
+                            continue;
+                        };
+                    }
+                }
+
+                if ((r.events & linux.EPOLL.OUT) != 0) {
+                    if (peer.session.wants_to == .WRITE) {
+                        peer.handle_write(self.alloc) catch |err| {
+                            log.err("[{f}] handle write error: {t}", .{ peer.addr, err });
+                            _ = try self.removePeer(peer);
+                            continue;
+                        };
+                    }
                 }
             }
 
@@ -245,15 +250,17 @@ pub const Session = struct {
         switch (io_message.status) {
             // The piece has been verified and finished
             .piece_completed => {
-                log.info("Downloaded piece #{d}\n", .{io_message.index});
+                log.info("Downloaded piece #{d} (total: {d}, connected peers: {d})", .{
+                    io_message.index,
+                    self.torrent.meta.getNumPieces(),
+                    self.peers.count(),
+                });
                 self.picker.markPieceCompleted(io_message.index);
                 self.tracker.onDownload(@intCast(self.torrent.meta.calculatePieceSize(io_message.index) catch 0));
             },
             // piece didn't pass the integrity check
             .integrity_failed => {
                 @panic("TODO: maybe create a markPieceFailed(io_message.index");
-                // self.picker.markPieceFailed(io_message.index);
-                // self.picker.updateAllBlockStates(io_message.index, .pending);
             },
             // all pieces have been verified succesfully
             .shutdown => self.stop(),

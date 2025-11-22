@@ -26,6 +26,7 @@ pub const ConnectionStatus = struct {
     is_choked: bool = true,
     is_interested: bool = false,
     in_endgame: bool = false,
+    wants_to: EventType = .WRITE,
     state: SessionState = .disconnected,
 };
 
@@ -79,7 +80,7 @@ pub const PeerConnection = struct {
         };
     }
 
-    pub fn deinit(self: *Self, alloc: std.mem.Allocator) !void {
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
         if (self.socket != -1) {
             std.posix.close(self.socket);
             self.socket = -1;
@@ -105,7 +106,7 @@ pub const PeerConnection = struct {
         }
         self.session.state = .normal;
         log.debug("[{f}] parsed bitfield, going to normal mode", .{self.addr});
-        try self.loop.?.writeMode(self); // we want to write interested
+        self.session.wants_to = .WRITE; // we want to write interested
     }
 
     pub fn parseHave(self: *Self, have: Message) !void {
@@ -115,7 +116,7 @@ pub const PeerConnection = struct {
         try self.man.picker.inc_piece_refcount(piece);
         self.session.state = .normal;
         log.debug("[{f}] parsed have, going to normal mode", .{self.addr});
-        try self.loop.?.writeMode(self); // we want to write interested
+        self.session.wants_to = .WRITE; // we want to write interested
     }
 
     pub fn handle_read(self: *Self, alloc: std.mem.Allocator) !void {
@@ -134,7 +135,7 @@ pub const PeerConnection = struct {
                             "[{f}] Peer sent an invalid handshake, closing...",
                             .{self.addr},
                         );
-                        try self.deinit(alloc);
+                        self.deinit(alloc);
                     },
                     error.WouldBlock => {},
                     else => return err,
@@ -200,7 +201,7 @@ pub const PeerConnection = struct {
                 if (written) {
                     // wait for unchoke
                     log.debug("[{f}] sent interested\n", .{self.addr});
-                    try self.loop.?.readMode(self);
+                    self.session.wants_to = .READ;
                     self.session.is_interested = true;
                 }
             }
@@ -209,18 +210,18 @@ pub const PeerConnection = struct {
                 // request pipeline
                 while (self.current_request_pipeline < self.target_request_pipeline) {
                     if (try self.man.picker.pickBlock(self)) |b| {
-                        log.debug("[{f}] sending request {any}", .{ self.addr, b });
+                        log.info("[{f}] sending request {any}", .{ self.addr, b });
                         try self.sendRequest(b);
                         _ = try self.man.picker.updateBlockState(b.index, b.begin, .requested);
                         self.current_request_pipeline += 1;
                     } else {
                         // TODO: do something more usefull
-                        log.warn("[{f}] request: could not pick block", .{self.addr});
+                        log.debug("[{f}] request: could not pick block", .{self.addr});
                         break;
                     }
                 }
                 // wait for piece
-                try self.loop.?.readMode(self);
+                self.session.wants_to = .READ;
             }
         } else if (event == .READ) {
             // wait for unchoke
@@ -232,7 +233,7 @@ pub const PeerConnection = struct {
                         // we can start requesting blocks
                         log.debug("[{f}] peer unchoked us", .{self.addr});
                         self.session.is_choked = false;
-                        try self.loop.?.writeMode(self);
+                        self.session.wants_to = .WRITE; // want to send blocks
                     }
                 }
             }
@@ -275,7 +276,7 @@ pub const PeerConnection = struct {
                     // if the request pipeline is empty, write again
                     // NOTE: this might not be very efficient
                     if (self.current_request_pipeline == 0) {
-                        try self.loop.?.writeMode(self);
+                        self.session.wants_to = .WRITE;
                     }
                 }
             }
@@ -324,9 +325,7 @@ pub const PeerConnection = struct {
         if (self.writer.to_write.len > 0) {
             // we already have an outgoing message; ensure we're in write mode
             // and wait for EPOLLOUT
-            self.loop.?.writeMode(self) catch |err| {
-                log.err("Could not set socket {d} for writing: {t}", .{ self.socket, err });
-            };
+            self.session.wants_to = .WRITE;
             return;
         }
 
@@ -336,16 +335,12 @@ pub const PeerConnection = struct {
         // if we didnt manage to write the handshake keep writing
         if (!written) {
             log.debug("[{f}] handshake not fully sent", .{self.addr});
-            self.loop.?.writeMode(self) catch |err| {
-                log.err("Could not set socket {d} for writing: {t}", .{ self.socket, err });
-            };
+            self.session.wants_to = .WRITE;
         } else {
             // switch to reading his handshake
             log.debug("[{f}] handshake sent", .{self.addr});
             self.session.state = .waiting_handshake;
-            self.loop.?.readMode(self) catch |err| {
-                log.err("Could not set socket {d} for reading: {t}", .{ self.socket, err });
-            };
+            self.session.wants_to = .READ;
         }
     }
 

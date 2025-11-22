@@ -158,7 +158,8 @@ fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
     for (self.pieces.items, 0..) |piece, i| {
         // if the piece is in `pieces`, the index of the piece must match the one
         // from `piece_map`
-        std.debug.assert(self.piece_map.items[piece].index.? == i);
+        self.piece_map.items[piece].index = @intCast(i);
+        // std.debug.assert(self.piece_map.items[piece].index.? == i);
 
         // Only pick pieces that the peer have
         if (have.isSet(piece)) {
@@ -186,7 +187,7 @@ fn pickPiece(self: *Self, have: std.DynamicBitSetUnmanaged) !?u32 {
                 return piece;
         }
     }
-    log.warn("Couldn't pick a piece", .{});
+    log.debug("Couldn't pick a piece", .{});
     // we might want to enter end-game mode or drop the connection
     return null;
 }
@@ -195,7 +196,7 @@ pub fn markPieceCompleted(self: *Self, piece: u32) void {
     // if we didnt alredy have that piece
     if (self.piece_map.items[piece].index) |index| {
         // debug check if the piece is not downloaded
-        if (@import("builtin").mode == .Debug) {
+        if (builtin_mode == .Debug) {
             if (!self.isPieceDownloaded(piece)) {
                 @panic("A piece that didn't finished downloading was marked as completed");
             }
@@ -230,7 +231,7 @@ pub fn markPieceCompleted(self: *Self, piece: u32) void {
         self.priority_boundaries.items[avail + 1] -= 1;
 
         // remove the pieces from downloading and from piece map
-        _ = self.pieces.pop();
+        // _ = self.pieces.pop();
         self.piece_map.items[piece].index = null;
 
         // deinit blocks
@@ -317,6 +318,11 @@ pub fn unregister_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged)
 
 /// Incrementing piece availability
 pub fn inc_piece_refcount(self: *Self, piece: u32) !void {
+    // dont increment pieces that we already downloaded
+    if (self.piece_map.items[piece].index == null) {
+        return;
+    }
+
     // aliases
     var pieces = self.pieces.items;
     var piece_map = self.piece_map.items;
@@ -332,8 +338,13 @@ pub fn inc_piece_refcount(self: *Self, piece: u32) !void {
         boundaries = self.priority_boundaries.items;
     }
 
+    std.debug.assert(piece < piece_map.len and piece >= 0);
     const old_index = piece_map[piece].index.?;
-    const move_to = boundaries[new_avail] - 1; // end of next bucket
+    var move_to: usize = boundaries[new_avail] - 1; // end of next bucket
+
+    if (move_to >= pieces.len) {
+        move_to = pieces.len - 1;
+    }
 
     // move the piece up into the next bucket
     const other_piece = pieces[move_to];
@@ -370,6 +381,8 @@ pub fn dec_piece_refcount(self: *Self, piece: u32) void {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
+const builtin_mode = builtin.mode;
 const log = std.log.scoped(.PiecePicker);
 const TorrentFile = @import("TorrentFile.zig");
 const PeerConnection = @import("peer.zig").PeerConnection;
