@@ -40,6 +40,10 @@
             .url = "git+https://github.com/freref/spsc-queue#3ce8a39c53b026ef42eb569e66bc04c6356869e8",
             .hash = "spsc_queue-0.0.0-AVEoh1VJAAAANyL-T7uKYvwDBTU9R0i42Avs_Bp-43wr",
         },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio#0a7d9b999ceec10d3f00746f911654b462ae34c3",
+            .hash = "zio-0.4.0-xHbVVP1lFQAHWeydlM6YY7aUfmD9D7dex3dVZU8iQ938",
+        },
     },
     .paths = .{
         "build.zig",

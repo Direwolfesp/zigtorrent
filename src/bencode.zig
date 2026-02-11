@@ -29,7 +29,7 @@ pub const Value = union(enum) {
     list: std.ArrayList(Value),
     dict: std.StringArrayHashMap(Value),
 
-    /// Givan a Value -> JSON string
+    /// Given a Value -> JSON string
     /// TODO: refactor this
     pub fn format(self: *const @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const nested = if (false) "\n" else "";

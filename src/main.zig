@@ -1,3 +1,12 @@
+const std = @import("std");
+const assert = std.debug.assert;
+const builtin = @import("builtin");
+
+const Session = @import("manager.zig").Session;
+const logger = @import("tests/logger.zig");
+
+const log = std.log.scoped(.main);
+
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
@@ -7,43 +16,27 @@ pub const std_options: std.Options = .{
 };
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    const alloc = gpa.allocator();
-    defer std.debug.assert(gpa.deinit() == .ok);
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const gpa = if (builtin.mode != .ReleaseFast) debug_allocator.allocator() else std.heap.smp_allocator;
+    defer if (builtin.mode != .ReleaseFast) std.debug.assert(debug_allocator.deinit() == .ok);
 
-    var buf: [2048]u8 = undefined;
-    var stdout_w = std.fs.File.stdout().writer(&buf);
-    const stdout = &stdout_w.interface;
-
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, args);
 
     const filename: []u8 = blk: {
         if (args.len == 2) {
             break :blk args[1];
         } else {
-            log.err("usage: ./program <torrent>", .{});
+            log.err("Usage: .{s} <torrent>", .{args[0]});
             std.process.exit(1);
         }
     };
 
-    var session: manager.Session = try .init(alloc, filename);
+    var session: Session = try .init(gpa, filename);
     defer session.deinit();
-
     try session.run();
-
-    try stdout.flush();
 }
 
 test {
     _ = std.testing.refAllDecls(@This());
 }
-
-const log = std.log.scoped(.main);
-
-const std = @import("std");
-const assert = std.debug.assert;
-const builtin = @import("builtin");
-
-const logger = @import("tests/logger.zig");
-const manager = @import("manager.zig");

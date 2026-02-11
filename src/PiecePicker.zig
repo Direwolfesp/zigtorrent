@@ -251,7 +251,12 @@ pub fn updateBlockState(self: *Self, piece_index: u32, block_begin: u32, state: 
         std.debug.assert(num_blocks > block_index);
         std.debug.assert(dl.block_state.items.len == num_blocks);
         dl.block_state.items[@intCast(block_index)] = state;
-        log.debug("updated block {d} (out of {d}) from piece {d} to {t}", .{ block_index, dl.block_state.items.len, piece_index, state });
+        log.debug("updated block {d} (out of {d}) from piece {d} to {t}", .{
+            block_index,
+            dl.block_state.items.len,
+            piece_index,
+            state,
+        });
     } else {
         // first time we pick this piece,
         // mark all blocks as pending, except the current block
@@ -278,8 +283,7 @@ pub fn isPieceDownloaded(self: Self, piece: u32) bool {
             }
         }
         return true;
-    }
-    @panic("TODO: the piece is not downloading");
+    } else @panic("TODO: the piece is not downloading");
 }
 
 /// Updates all the BlockState for the given `piece`.
@@ -292,7 +296,7 @@ pub fn updateAllBlockStates(self: *Self, piece: u32, new_state: BlockState) void
 }
 
 // For each set bit in bitfield, increment piece availabity
-pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !void {
+pub fn registerPeerPieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !void {
     std.debug.assert(bitfield.count() > 0);
 
     log.debug("peer has {d} pieces out of {d}", .{
@@ -303,21 +307,21 @@ pub fn register_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) !
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
         std.debug.assert(piece_index >= 0 and piece_index < self.torrent.getNumPieces());
-        try self.inc_piece_refcount(@intCast(piece_index));
+        try self.incPieceRefcount(@intCast(piece_index));
     }
 }
 
 // For each set bit in bitfield, decrement piece availabity
-pub fn unregister_peer_pieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
+pub fn unregisterPeerPieces(self: *Self, bitfield: std.DynamicBitSetUnmanaged) void {
     var iter = bitfield.iterator(.{ .kind = .set });
     while (iter.next()) |piece_index| {
         std.debug.assert(piece_index >= 0 and piece_index < self.torrent.getNumPieces());
-        self.dec_piece_refcount(@intCast(piece_index));
+        self.decPieceRefcount(@intCast(piece_index));
     }
 }
 
 /// Incrementing piece availability
-pub fn inc_piece_refcount(self: *Self, piece: u32) !void {
+pub fn incPieceRefcount(self: *Self, piece: u32) !void {
     // dont increment pieces that we already downloaded
     if (self.piece_map.items[piece].index == null) {
         return;
@@ -357,7 +361,7 @@ pub fn inc_piece_refcount(self: *Self, piece: u32) !void {
 }
 
 /// Decrement piece availability
-pub fn dec_piece_refcount(self: *Self, piece: u32) void {
+pub fn decPieceRefcount(self: *Self, piece: u32) void {
     var pieces = self.pieces.items;
     var piece_map = self.piece_map.items;
     var boundaries = self.priority_boundaries.items;

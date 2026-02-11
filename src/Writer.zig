@@ -17,7 +17,7 @@ to_write: []u8,
 
 pub fn init(alloc: std.mem.Allocator, size: usize, socket: std.posix.socket_t) !Self {
     const write_buf = try alloc.alloc(u8, size);
-    errdefer alloc.free(write_buf);
+
     return .{
         .socket = socket,
         .write_buf = write_buf,
@@ -38,14 +38,14 @@ pub fn writeHandshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile)
     const handshake_len = handshake_bytes.len;
 
     std.debug.assert(handshake_len == Message.HANDSHAKE_LEN);
-    if (handshake_bytes.len > self.write_buf.len) return Error.BufferTooSmall;
+    if (handshake_bytes.len > self.write_buf.len) return WriterError.BufferTooSmall;
 
     @memmove(self.write_buf[0..handshake_len], handshake_bytes);
     self.to_write = self.write_buf[0..handshake_len];
     return try self.flush();
 }
 
-const Error = error{
+const WriterError = error{
     BufferTooSmall,
     PendingMessage,
     Closed,
@@ -54,44 +54,51 @@ const Error = error{
 /// `msg` doesn't include the len prefix
 /// Returns false if it didn't manage to write all the buffer,
 /// true if it could, this can be used to change the event loop mode.
-pub fn writeMessage(self: *Self, msg: Message) Error!bool {
+pub fn writeMessage(self: *Self, msg: Message) WriterError!bool {
     if (self.to_write.len > 0) {
-        return Error.PendingMessage;
+        return WriterError.PendingMessage;
     }
 
     // id + body
     const total_len: u32 = 1 + if (msg.payload) |p| @as(u32, @intCast(p.len)) else 0;
-    if (total_len + 4 > self.write_buf.len) return Error.BufferTooSmall;
+    if (total_len + 4 > self.write_buf.len)
+        return WriterError.BufferTooSmall;
 
-    if (msg.id != .keep_alive) {
-        // length
-        std.mem.writeInt(u32, self.write_buf[0..4], total_len, .big);
-        // id
-        self.write_buf[4] = @intFromEnum(msg.id);
+    return switch (msg.id) {
+        .keep_alive => blk: {
+            std.mem.writeInt(u32, self.write_buf[0..4], 0, .big);
+            self.to_write = self.write_buf[0..4];
+            break :blk self.flush();
+        },
+        else => blk: {
+            // length
+            std.mem.writeInt(u32, self.write_buf[0..4], total_len, .big);
+            // id
+            self.write_buf[4] = @intFromEnum(msg.id);
 
-        // payload
-        if (msg.payload) |p| {
-            @memmove(self.write_buf[5 .. 5 + p.len], p);
-        }
-        self.to_write = self.write_buf[0 .. 4 + total_len];
-        return try self.flush();
-    } else {
-        std.mem.writeInt(u32, self.write_buf[0..4], 0, .big);
-        self.to_write = self.write_buf[0..4];
-        return try self.flush();
-    }
+            // payload
+            if (msg.payload) |p| {
+                @memmove(self.write_buf[5 .. 5 + p.len], p);
+            }
+
+            self.to_write = self.write_buf[0 .. 4 + total_len];
+            break :blk try self.flush();
+        },
+    };
 }
 
 /// dumps `to_write` into the socket
 /// Returns false if it didn't manage to write all the buffer,
 /// true if otherwise.
-pub fn flush(self: *Self) Error!bool {
+pub fn flush(self: *Self) WriterError!bool {
+    std.debug.assert(self.socket >= 0);
+
     const n = std.posix.write(self.socket, self.to_write) catch |err|
         return switch (err) {
             error.WouldBlock => false,
             else => err,
         };
-    if (n == 0) return Error.Closed;
+    if (n == 0) return WriterError.Closed;
     self.to_write = self.to_write[n..];
     return self.to_write.len == 0;
 }

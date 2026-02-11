@@ -1,7 +1,7 @@
-//! This struct is reponsible of managing all filesystem operations
+//! This struct is reponsible for managing all filesystem operations
 //! such as verifying the piece hashes and writing each piece to the apropiate
-//! file. It should run in a different thread from the main loop and
-//! comunicate via two queues to the user.
+//! file. It runs in a different thread from the main loop and
+//! comunicates via two queues to the user.
 //!
 //! Downloaded torrent might look like this:
 //!
@@ -119,11 +119,7 @@ pub fn deinit(self: *Self) void {
 /// Add a message to the queue. Blocks if full
 pub fn submit(self: *Self, task: IOMessage) !void {
     log.debug("got a new submission: action = {t}, piece = {d}", .{ task.status, task.index });
-    self.submission_queue.push(IOMessage{
-        .status = task.status,
-        .index = task.index,
-        .sender = task.sender,
-    });
+    self.submission_queue.push(task);
 }
 
 /// Pop from completion queue, null if empty
@@ -156,7 +152,7 @@ pub fn processTask(self: *Self) !void {
             .check_integrity => {
                 defer self.completion_queue.push(task);
 
-                if (try self.checkIntegrity(task.index)) {
+                if (self.checkIntegrity(task.index)) |_| {
                     log.debug("Piece #{d} verified successfully", .{task.index});
                     task.status = .piece_completed;
                     self.count += 1;
@@ -167,9 +163,9 @@ pub fn processTask(self: *Self) !void {
                         task.status = .shutdown;
                         break;
                     }
-                } else {
+                } else |err| {
                     task.status = .integrity_failed;
-                    log.warn("Piece #{d} failed integrity check", .{task.index});
+                    log.warn("Piece #{d} failed integrity check: {t}", .{ task.index, err });
                 }
             },
             else => @panic("got unhandled submission"),

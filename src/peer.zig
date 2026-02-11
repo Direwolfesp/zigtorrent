@@ -1,6 +1,6 @@
 //!
 
-const EventType = enum {
+pub const EventType = enum {
     READ,
     WRITE,
 };
@@ -106,65 +106,61 @@ pub const PeerConnection = struct {
         }
         self.session.state = .normal;
         log.debug("[{f}] parsed bitfield, going to normal mode", .{self.addr});
-        self.session.wants_to = .WRITE; // we want to write interested
+        self.session.wants_to = .WRITE; // we want to write `interested`
     }
 
     pub fn parseHave(self: *Self, have: Message) !void {
         std.debug.assert(have.id == .have);
         const piece: u32 = std.mem.readInt(u32, have.payload.?[0..4], .little);
         self.peer_bitfield.set(piece);
-        try self.man.picker.inc_piece_refcount(piece);
+        try self.man.picker.incPieceRefcount(piece);
         self.session.state = .normal;
         log.debug("[{f}] parsed have, going to normal mode", .{self.addr});
         self.session.wants_to = .WRITE; // we want to write interested
     }
 
-    pub fn handle_read(self: *Self, alloc: std.mem.Allocator) !void {
+    pub fn handle(self: *Self, alloc: std.mem.Allocator, event: EventType) !void {
+        return switch (event) {
+            .READ => self.handleRead(alloc),
+            .WRITE => self.handleWrite(alloc),
+        };
+    }
+
+    fn handleRead(self: *Self, alloc: std.mem.Allocator) !void {
         log.debug("[{f}] Entering handle read", .{self.addr});
         switch (self.session.state) {
-            .disconnected => {},
-            .connecting => {},
-            .connected => {},
-            .waiting_handshake => self.recv_handshake(
+            .waiting_handshake => self.recvHandshake(
                 self.man.peer_id,
                 &self.man.torrent.meta,
-            ) catch |err|
-                switch (err) {
-                    error.InvalidHandshake => {
-                        log.err(
-                            "[{f}] Peer sent an invalid handshake, closing...",
-                            .{self.addr},
-                        );
-                        self.deinit(alloc);
-                    },
-                    error.WouldBlock => {},
-                    else => return err,
+            ) catch |err| switch (err) {
+                error.InvalidHandshake => {
+                    log.err("[{f}] Peer sent an invalid handshake, closing...", .{self.addr});
+                    self.deinit(alloc);
                 },
-            .sending_handshake => {},
+                error.WouldBlock => {},
+                else => return err,
+            },
             .waiting_availability => {
                 if (self.reader.readMessage(alloc)) |msg| {
                     const m = msg orelse return;
                     defer m.deinit(alloc);
+
                     switch (m.id) {
                         .bitfield => try self.parseBitfield(m),
                         .have => try self.parseHave(m),
                         else => {
-                            log.err("[{f}] Expected bitfield but found '{t}'", .{
-                                self.addr,
-                                m.id,
-                            });
+                            log.err("[{f}] Expected bitfield but found '{t}'", .{ self.addr, m.id });
                             return;
                         },
                     }
+
                     log.debug("[{f}] received bitfiled from peer, registering pieces...", .{self.addr});
-                    self.man.picker.register_peer_pieces(self.peer_bitfield) catch |err| {
+                    self.man.picker.registerPeerPieces(self.peer_bitfield) catch |err| {
                         log.err("[{f}] Could not register peer pieces from his bitfield: {t}", .{ self.addr, err });
                     };
                 } else |err| {
-                    log.warn("[{f}] Error while waiting availability: {t}", .{
-                        self.addr,
-                        err,
-                    });
+                    log.warn("[{f}] Error while waiting availability: {t}", .{ self.addr, err });
+                    try self.man.removePeer(self);
                 }
             },
             .normal => self.handleNormal(alloc, .READ) catch |err| switch (err) {
@@ -174,124 +170,129 @@ pub const PeerConnection = struct {
                 },
                 else => return err,
             },
+            .disconnected,
+            .connecting,
+            .connected,
+            .sending_handshake,
+            => {},
         }
     }
 
-    pub fn handle_write(self: *Self, alloc: std.mem.Allocator) !void {
-        log.debug("[{f}] Entering handle write", .{self.addr});
+    fn handleWrite(self: *Self, alloc: std.mem.Allocator) !void {
         switch (self.session.state) {
             .connecting => try self.connect(self.loop.?),
-            .connected => try self.init_handshake(),
-            .sending_handshake => try self.init_handshake(),
+            .connected => try self.initHandshake(),
+            .sending_handshake => try self.initHandshake(),
             .normal => try self.handleNormal(alloc, .WRITE),
-            else => log.debug("[{f}] unhandled write: {t}", .{ self.addr, self.session.state }),
+            else => {},
         }
     }
 
-    pub fn handleNormal(self: *Self, alloc: std.mem.Allocator, event: EventType) !void {
-        if (event == .WRITE) {
-            // write interested
-            if (!self.session.is_interested and self.session.is_choked) {
-                log.debug("[{f}] sending interested\n", .{self.addr});
-                const written = try self.writer.writeMessage(.{
-                    .id = .interested,
-                    .payload = null,
-                });
+    fn handleNormal(self: *Self, alloc: std.mem.Allocator, event: EventType) !void {
+        switch (event) {
+            .WRITE => {
+                // write interested
+                if (!self.session.is_interested and self.session.is_choked) {
+                    log.debug("[{f}] sending interested\n", .{self.addr});
+                    const written = try self.writer.writeMessage(.{
+                        .id = .interested,
+                        .payload = null,
+                    });
 
-                if (written) {
                     // wait for unchoke
-                    log.debug("[{f}] sent interested\n", .{self.addr});
+                    if (written) {
+                        log.debug("[{f}] sent interested\n", .{self.addr});
+                        self.session.wants_to = .READ;
+                        self.session.is_interested = true;
+                    }
+                }
+                // request blocks
+                else if (self.session.is_interested and !self.session.is_choked) {
+                    // request pipeline
+                    while (self.current_request_pipeline < self.target_request_pipeline) {
+                        if (try self.man.picker.pickBlock(self)) |b| {
+                            log.info("[{f}] sending request {any}", .{ self.addr, b });
+                            try self.sendRequest(b);
+                            _ = try self.man.picker.updateBlockState(b.index, b.begin, .requested);
+                            self.current_request_pipeline += 1;
+                        } else {
+                            // TODO: do something more usefull
+                            log.debug("[{f}] request: could not pick block", .{self.addr});
+                            break;
+                        }
+                    }
+                    // wait for piece
                     self.session.wants_to = .READ;
-                    self.session.is_interested = true;
                 }
-            }
-            // request blocks
-            else if (self.session.is_interested and !self.session.is_choked) {
-                // request pipeline
-                while (self.current_request_pipeline < self.target_request_pipeline) {
-                    if (try self.man.picker.pickBlock(self)) |b| {
-                        log.info("[{f}] sending request {any}", .{ self.addr, b });
-                        try self.sendRequest(b);
-                        _ = try self.man.picker.updateBlockState(b.index, b.begin, .requested);
-                        self.current_request_pipeline += 1;
-                    } else {
-                        // TODO: do something more usefull
-                        log.debug("[{f}] request: could not pick block", .{self.addr});
-                        break;
+            },
+            .READ => {
+                // wait for unchoke
+                if (self.session.is_interested and self.session.is_choked) {
+                    const message = try self.reader.readMessage(alloc);
+                    if (message) |msg| {
+                        defer msg.deinit(alloc);
+                        if (msg.id == .unchoke) {
+                            // we can start requesting blocks
+                            log.debug("[{f}] peer unchoked us", .{self.addr});
+                            self.session.is_choked = false;
+                            self.session.wants_to = .WRITE; // want to send blocks
+                        }
                     }
                 }
-                // wait for piece
-                self.session.wants_to = .READ;
-            }
-        } else if (event == .READ) {
-            // wait for unchoke
-            if (self.session.is_interested and self.session.is_choked) {
-                const message = try self.reader.readMessage(alloc);
-                if (message) |msg| {
+                // try to read piece
+                else if (self.session.is_interested and !self.session.is_choked) {
+                    // if we didnt read any message return
+                    const msg = try self.reader.readMessage(alloc) orelse return;
                     defer msg.deinit(alloc);
-                    if (msg.id == .unchoke) {
-                        // we can start requesting blocks
-                        log.debug("[{f}] peer unchoked us", .{self.addr});
-                        self.session.is_choked = false;
-                        self.session.wants_to = .WRITE; // want to send blocks
-                    }
-                }
-            }
-            // try to read piece
-            else if (self.session.is_interested and !self.session.is_choked) {
-                // if we didnt read any message return
-                const msg = try self.reader.readMessage(alloc) orelse return;
-                defer msg.deinit(alloc);
 
-                if (msg.id == .piece) {
-                    const block = Block{
-                        .index = std.mem.readInt(u32, msg.payload.?[0..4], .big),
-                        .begin = std.mem.readInt(u32, msg.payload.?[4..8], .big),
-                        .payload = msg.payload.?[8..],
-                    };
-                    log.debug(
-                        "[{f}] peer sent piece: {{ .index = {d}, .begin = {d}}}",
-                        .{ self.addr, block.index, block.begin },
-                    );
-
-                    self.current_request_pipeline -= 1;
-
-                    // write to disk
-                    self.man.fs.writeBlock(block);
-
-                    // mark it as downloaded
-                    try self.man.picker.updateBlockState(block.index, block.begin, .downloaded);
-
-                    // if we downloaded the whole piece already, mark blocks as verifying and
-                    // enqueue task
-                    if (self.man.picker.isPieceDownloaded(block.index)) {
-                        self.man.picker.updateAllBlockStates(block.index, .verifying);
-                        try self.man.fs.submit(.{
-                            .status = .check_integrity,
-                            .index = block.index,
-                            .sender = self,
+                    if (msg.id == .piece) {
+                        const block = Block{
+                            .index = std.mem.readInt(u32, msg.payload.?[0..4], .big),
+                            .begin = std.mem.readInt(u32, msg.payload.?[4..8], .big),
+                            .payload = msg.payload.?[8..],
+                        };
+                        log.debug("[{f}] peer sent piece: {{ .index = {d}, .begin = {d}}}", .{
+                            self.addr,
+                            block.index,
+                            block.begin,
                         });
-                    }
 
-                    // if the request pipeline is empty, write again
-                    // NOTE: this might not be very efficient
-                    if (self.current_request_pipeline == 0) {
-                        self.session.wants_to = .WRITE;
+                        self.current_request_pipeline -= 1;
+
+                        // write to disk
+                        self.man.fs.writeBlock(block);
+
+                        // mark it as downloaded
+                        try self.man.picker.updateBlockState(block.index, block.begin, .downloaded);
+
+                        // if we downloaded the whole piece already, mark blocks as verifying and
+                        // enqueue task
+                        if (self.man.picker.isPieceDownloaded(block.index)) {
+                            self.man.picker.updateAllBlockStates(block.index, .verifying);
+                            try self.man.fs.submit(.{
+                                .status = .check_integrity,
+                                .index = block.index,
+                                .sender = self,
+                            });
+                        }
+
+                        // if the request pipeline is empty, write again
+                        // NOTE: this might not be very efficient
+                        if (self.current_request_pipeline == 0) {
+                            self.session.wants_to = .WRITE;
+                        }
                     }
                 }
-            }
+            },
         }
     }
 
-    pub fn sendRequest(self: *Self, block: BlockRequest) !void {
+    fn sendRequest(self: *Self, block: BlockRequest) !void {
         var req_payload: [12]u8 = undefined;
         std.mem.writeInt(u32, req_payload[0..4], block.index, .big);
         std.mem.writeInt(u32, req_payload[4..8], block.begin, .big);
         std.mem.writeInt(u32, req_payload[8..12], block.length, .big);
-        _ = try self.writer.writeMessage(.{
-            .id = .request,
-            .payload = &req_payload,
-        });
+        _ = try self.writer.writeMessage(.{ .id = .request, .payload = &req_payload });
     }
 
     pub fn connect(self: *Self, loop: *Epoll) !void {
@@ -316,7 +317,7 @@ pub const PeerConnection = struct {
         self.session.state = .connected;
     }
 
-    pub fn init_handshake(self: *Self) !void {
+    fn initHandshake(self: *Self) !void {
         std.debug.assert(self.socket != -1);
         std.debug.assert(self.session.state == .connected);
 
@@ -344,7 +345,7 @@ pub const PeerConnection = struct {
         }
     }
 
-    pub fn recv_handshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) !void {
+    fn recvHandshake(self: *Self, peer_id: [20]u8, torrent: *const TorrentFile) !void {
         std.debug.assert(self.socket != -1);
         std.debug.assert(self.session.state == .waiting_handshake);
 

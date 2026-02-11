@@ -135,7 +135,7 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
     try info.encodeBencode(str_writer);
     var sha1 = Sha1.init(.{});
     sha1.update(str_writer.buffer);
-    const info_hash: [Sha1.digest_length]u8 = sha1.finalResult();
+    const info_hash = sha1.finalResult();
 
     // piece length
     const piece_length = infoDict.get("piece length") orelse return TorrentError.MissingField;
@@ -219,7 +219,6 @@ fn init(allocator: Allocator, value: bencode.Value) !TorrentFile {
     };
 
     res.initDownloadSize();
-
     return res;
 }
 
@@ -247,6 +246,10 @@ fn initDownloadSize(self: *TorrentFile) void {
     };
 }
 
+pub fn getPieceLength(self: *const TorrentFile) i64 {
+    return self.info.piece_length;
+}
+
 pub fn getNumPieces(self: *const TorrentFile) usize {
     return self.info.pieces.len;
 }
@@ -269,23 +272,14 @@ pub fn calculateNumBlocks(self: *const TorrentFile, piece: usize) !i64 {
 /// the last index might get a piece smaller than the other pieces
 /// this is only necesary one per piece
 pub fn calculatePieceSize(self: *const TorrentFile, index: usize) !i64 {
-    const num_whole_pieces = std.math.divFloor(
-        i64,
-        self.download_size,
-        self.info.piece_length,
-    ) catch |err| switch (err) {
-        // FIXME: piece_length is getting corrupted somehow
-        error.DivisionByZero => {
-            log.err("division by zero: denominator {d}", .{self.info.piece_length});
-            std.process.exit(0);
-        },
-        else => return err,
-    };
-    std.debug.assert(index >= 0 and index <= num_whole_pieces);
-    return if (index < num_whole_pieces)
-        self.info.piece_length
+    const piece_length: i64 = self.getPieceLength();
+    std.debug.assert(piece_length != 0);
+    const rem = @mod(self.download_size, @as(i64, @intCast(piece_length)));
+
+    return if (index == self.getNumPieces() - 1 and rem != 0)
+        rem
     else
-        self.download_size - num_whole_pieces * self.info.piece_length;
+        piece_length;
 }
 
 /// Parses the given torrent file and retreives its contents.
@@ -300,9 +294,9 @@ pub fn open(allocator: Allocator, path: []const u8) !TorrentManaged {
     const contents: []const u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
     errdefer allocator.free(contents);
 
-    var b: Value = bencode.decodeBencode(allocator, contents) catch |e| {
-        log.err("File contains invalid bencode: '{s}'\n", .{path});
-        return e;
+    var b: Value = bencode.decodeBencode(allocator, contents) catch |err| {
+        log.err("File '{s}' contains invalid bencode: {t}\n", .{ path, err });
+        std.process.exit(1);
     };
     errdefer b.deinit(allocator);
 

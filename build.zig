@@ -8,13 +8,25 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+
+        .dwarf_format = .@"64",
+        .omit_frame_pointer = false,
+        .strip = false,
     });
 
+    // spsc
     const spsc = b.dependency("spsc_queue", .{
         .target = target,
         .optimize = optimize,
     });
     exe_mod.addImport("spsc_queue", spsc.module("spsc_queue"));
+
+    // zio
+    const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("zio", zio.module("zio"));
 
     const exe = b.addExecutable(.{
         .name = "zigtorrent_testing",

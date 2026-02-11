@@ -143,9 +143,6 @@ pub fn announce(self: *Tracker, allocator: std.mem.Allocator) !void {
     var client = std.http.Client{ .allocator = alloc };
     defer client.deinit();
 
-    const server_header_buff: []u8 = try alloc.alloc(u8, 1024);
-    defer alloc.free(server_header_buff);
-
     var res_alloc: std.Io.Writer.Allocating = try .initCapacity(alloc, 1000);
     defer res_alloc.deinit();
     const res_writer: *std.Io.Writer = &res_alloc.writer;

@@ -17,11 +17,7 @@ start: usize = 0,
 
 pub fn init(allocator: std.mem.Allocator, size: usize) !Reader {
     const buf = try allocator.alloc(u8, size);
-    return .{
-        .pos = 0,
-        .start = 0,
-        .buf = buf,
-    };
+    return .{ .buf = buf };
 }
 
 pub fn deinit(self: *const Reader, allocator: std.mem.Allocator) void {
@@ -29,6 +25,8 @@ pub fn deinit(self: *const Reader, allocator: std.mem.Allocator) void {
 }
 
 pub fn readHandshake(self: *Reader) !?HandShake {
+    std.debug.assert(self.socket >= 0);
+
     var hs_bytes: [Message.HANDSHAKE_LEN]u8 = undefined;
     const n = posix.read(self.socket, &hs_bytes) catch |err| return switch (err) {
         error.WouldBlock => null,
@@ -46,6 +44,8 @@ pub fn readHandshake(self: *Reader) !?HandShake {
 }
 
 pub fn readMessage(self: *Reader, alloc: std.mem.Allocator) !?Message {
+    std.debug.assert(self.socket >= 0);
+
     if (try self.bufferedMessage()) |msg| {
         return try Message.fromBytes(alloc, msg);
     }
@@ -63,6 +63,7 @@ pub fn readMessage(self: *Reader, alloc: std.mem.Allocator) !?Message {
 
     return null;
 }
+
 fn bufferedMessage(self: *Reader) !?[]u8 {
     const buf = self.buf;
     const pos = self.pos;
