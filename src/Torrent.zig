@@ -1,23 +1,22 @@
 const std = @import("std");
+const Io = std.Io;
 const Sha1 = std.crypto.hash.Sha1;
 const Allocator = std.mem.Allocator;
 
-const stdout = std.io.getStdOut().writer();
-const stderr = std.io.getStdErr().writer();
-const Thread = std.Thread;
-
-const Bencode = @import("Bencode.zig");
+const bencode = @import("bencode.zig");
 const Tracker = @import("Tracker.zig");
 const Client = @import("Client.zig").Client;
 const Message = @import("Messages.zig").Message;
 const Peer = @import("Peer.zig");
 
+const log = std.log.scoped(.torrent);
+
 const Context = struct {
     meta: *MetaInfo,
     allocator: Allocator,
     peer: std.net.Ip4Address,
-    tasks: *Tasks,
-    results: *Results,
+    tasks: *Io.Queue(PieceTask),
+    results: *Io.Queue(PieceCompleted),
 };
 
 const PieceTask = struct {
@@ -36,72 +35,6 @@ const PieceCompleted = struct {
     buf: []const u8,
 };
 
-const PieceStatus = struct {
-    index: u32,
-    client: *Client,
-    requested: u32,
-    downloaded: u32,
-    pipeline_length: u32,
-};
-
-/// Data type that hold a fifo queue protected by a mutex and condition.
-/// With blocking I/O.
-fn AtomicQueue(comptime T: type) type {
-    return struct {
-        queue: std.fifo.LinearFifo(T, .Dynamic),
-        mutex: Thread.Mutex,
-        cond: Thread.Condition,
-
-        /// Caller owns the returned memory, call deinit()
-        pub fn init(allocator: Allocator) @This() {
-            return .{
-                .mutex = .{},
-                .cond = .{},
-                .queue = std.fifo.LinearFifo(T, .Dynamic).init(allocator),
-            };
-        }
-
-        pub fn deinit(self: @This()) void {
-            self.queue.deinit();
-        }
-
-        pub fn isEmpty(self: *@This()) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            return self.queue.count == 0;
-        }
-
-        pub fn getCount(self: *@This()) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            return self.queue.count;
-        }
-
-        /// Enqueues T
-        pub fn enqueueElem(self: *@This(), elem: T) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            const e: [1]T = .{elem};
-            _ = try self.queue.write(e[0..]);
-            self.cond.signal();
-        }
-
-        /// reads and dequeus T. Blocking
-        pub fn dequeueElem(self: *@This()) T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            var buf: [1]T = undefined;
-            while (self.queue.read(buf[0..]) == 0)
-                self.cond.wait(&self.mutex);
-            return buf[0];
-        }
-    };
-}
-
-const Tasks = AtomicQueue(PieceTask);
-const Results = AtomicQueue(PieceCompleted);
-
 const MetaInfoError = error{
     FileNotFound,
     WrongType,
@@ -113,7 +46,7 @@ const MetaInfoError = error{
 /// Single File Only
 pub const MetaInfo = struct {
     /// not meant to be accessed directly, this just points to memory created by allocator
-    values: Bencode.Value,
+    values: bencode.Value,
 
     /// tracker url
     announce: []const u8 = undefined,
@@ -141,12 +74,12 @@ pub const MetaInfo = struct {
     /// Not meant to be called directly.
     /// The allocator should hold the backing buffer of the `value`
     /// thus the need to call deinit
-    fn init(allocator: Allocator, value: Bencode.Value) !MetaInfo {
+    fn init(allocator: Allocator, value: bencode.Value) !MetaInfo {
         if (value != .dict) return MetaInfoError.WrongType;
         const metaDict = value.dict;
 
         // announce
-        const announce: Bencode.Value = metaDict.get("announce") orelse return MetaInfoError.MisingField;
+        const announce: bencode.Value = metaDict.get("announce") orelse return MetaInfoError.MisingField;
         if (announce != .string) return MetaInfoError.WrongType;
 
         // info
@@ -197,68 +130,72 @@ pub const MetaInfo = struct {
         };
     }
 
-    /// Downloads a torrent file into ofile
-    /// returns true in success, false otherwise
-    pub fn download(self: *MetaInfo, allocator: Allocator, ofile: []const u8) !bool {
-        const peers = try Tracker.getPeersFromResponse(allocator, self);
-        defer allocator.free(peers);
-
-        var tasks = Tasks.init(allocator);
-        defer tasks.deinit();
-
-        // Fill in piece tasks
-        try tasks.queue.ensureTotalCapacity(self.info.pieces.len);
+    fn fillTasks(self: MetaInfo, io: Io, tasks: *Io.Queue(PieceTask)) !void {
         for (self.info.pieces, 0..) |piece_hash, i| {
-            try tasks.enqueueElem(PieceTask{
+            try tasks.putOne(io, PieceTask{
                 .hash = piece_hash,
                 .index = @intCast(i),
                 .length = @intCast(try self.calculatePieceSize(i)),
             });
         }
+    }
 
-        // atomic queue that will hold the results procuded by the workers
-        var res = Results.init(allocator);
-        defer res.deinit();
+    /// Downloads a torrent file into ofile
+    /// returns true in success, false otherwise
+    pub fn download(self: *MetaInfo, io: Io, allocator: Allocator, ofile: []const u8) !bool {
+        log.info("Starting download for {s}", .{self.info.name});
 
-        // Spawn workers
-        const num_workers: u64 = @min(self.info.pieces.len, try Thread.getCpuCount() * 2, peers.len);
-        var pool: Thread.Pool = undefined;
-        try pool.init(.{ .allocator = allocator, .n_jobs = num_workers });
-        defer pool.deinit();
-        var wg: Thread.WaitGroup = .{};
-        for (0..num_workers) |_| {
-            const peer = peers[std.crypto.random.intRangeAtMost(usize, 0, peers.len - 1)];
-            const ctx: *Context = try allocator.create(Context);
+        const peers = try Tracker.getPeersFromResponse(allocator, self);
+        defer allocator.free(peers);
 
-            ctx.* = .{
-                .meta = self,
-                .allocator = allocator,
-                .peer = peer,
-                .tasks = &tasks,
-                .results = &res,
-            };
+        var tasks_buf: [0x4000]u8 = undefined;
+        var tasks_queue: Io.Queue(PieceTask) = .init(&tasks_buf);
+        defer tasks_queue.close(io);
 
-            pool.spawnWg(&wg, downloadWorkerThreadFn, .{ctx});
+        // Fill in piece queue
+        const producer_task = try io.concurrent(fillTasks, .{ self, io, &tasks_queue });
+        defer producer_task.cancel(io) catch {};
+
+        var results_buf: [0x4000]u8 = undefined;
+        var results_queue: Io.Queue(PieceCompleted) = .init(&results_buf);
+        defer results_queue.close(io);
+
+        for (peers) |p| {
+            try io.concurrent(downloadWorker, .{ self, io, allocator, p, &tasks_queue, &results_queue });
         }
 
+        // Spawn workers
+        // for (0..num_workers) |_| {
+        //     const peer = peers[std.crypto.random.intRangeAtMost(usize, 0, peers.len - 1)];
+        //     const ctx: *Context = try allocator.create(Context);
+
+        //     ctx.* = .{
+        //         .meta = self,
+        //         .allocator = allocator,
+        //         .peer = peer,
+        //         .tasks = &tasks,
+        //         .results = &res,
+        //     };
+        // }
+
         // copy the results into a buffer
-        var buff: []u8 = try allocator.alloc(u8, @intCast(self.info.length));
-        defer allocator.free(buff);
+        var downloaded_content: []u8 = try allocator.alloc(u8, @intCast(self.info.length));
+        defer allocator.free(downloaded_content);
 
         // main thread will keep reading the result queue and
         // copy each PieceResult into the buffer
         var pieces_downloaded: u64 = 0;
         while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
-            const piece_res: PieceCompleted = res.dequeueElem();
+            const piece_res: PieceCompleted = results_queue.dequeueElem();
 
             const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
             const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
 
-            @memcpy(buff[start..end], piece_res.buf);
+            @memcpy(downloaded_content[start..end], piece_res.buf);
             allocator.free(piece_res.buf);
 
             const percent: f64 = @as(f64, @floatFromInt(pieces_downloaded)) / @as(f64, @floatFromInt(self.info.pieces.len)) * 100.0;
-            try stdout.print("[{d:0>5.2}%] Downloaded piece #{d}. {} of {}\n", .{
+            log.info("[{d:0>5.2}%] Downloaded piece #{d}. {} of {}", .{
                 percent,
                 piece_res.index,
                 pieces_downloaded,
@@ -266,64 +203,52 @@ pub const MetaInfo = struct {
             });
         }
 
-        // wait for threads
-        wg.wait();
-
         // copy buffer into file
-        var file = std.fs.cwd().createFile(ofile, .{}) catch |err| {
-            stdout.print("Could not create file '{s}', Err: '{?}'\n", .{ ofile, err }) catch {};
+        var file = Io.Dir.cwd().createFile(io, ofile, .{}) catch |err| {
+            log.err("Could not create file '{s}', Err: '{?}'", .{ ofile, err });
             return false;
         };
-        defer file.close();
-        try file.writer().writeAll(buff);
+        defer file.close(io);
+
+        var file_buf: [0x4000]u8 = undefined;
+        var wr = file.writer(io, &file_buf);
+        try wr.interface.writeAll(&downloaded_content);
         return true;
     }
 
+    /// Pumps PieceTask's from `tasks` and dumps the PieceResult's in `results` queue
     pub fn downloadWorker(
-        self: *const @This(),
-        allocator: Allocator,
-        peer: std.net.Ip4Address,
-        tasks: *Tasks,
-        results: *Results,
+        self: MetaInfo,
+        io: Io,
+        gpa: Allocator,
+        peer: Io.net.Ip4Address,
+        tasks: *Io.Queue(PieceTask),
+        results: *Io.Queue(PieceCompleted),
     ) !void {
-        var client = try Client.new(
-            allocator,
-            peer,
-            Peer.ID,
-            self,
-        );
-        defer client.deinit(allocator);
+        var client = try Client.new(io, gpa, peer, Peer.ID, &self);
+        defer client.deinit(gpa);
 
         try client.sendUnchoke();
         try client.sendInterested();
 
-        while (!tasks.isEmpty()) { // TOCTOU ??
-            const task: PieceTask = tasks.dequeueElem();
-
+        while (tasks.getOne(io)) |task| {
             // if client doesnt have the piece, requeue it
             if (!try client.hasPiece(task.index)) {
-                try tasks.enqueueElem(task);
+                try tasks.putOne(io, task);
                 continue;
             }
 
-            // allocate mem for the piece
-            const piece_buffer = try allocator.alloc(u8, task.length);
-            const piece_downloaded: bool = try downloadPiece(
-                allocator,
-                &client,
-                &task,
-                piece_buffer,
-            );
+            const piece_buffer = try gpa.alloc(u8, task.length);
+            errdefer gpa.free(piece_buffer);
 
-            if (!piece_downloaded) {
-                try tasks.enqueueElem(task); // try again later
-                continue;
-            }
+            downloadPiece(io, gpa, &client, task, piece_buffer) catch {
+                log.err("Exiting", .{});
+                try tasks.putOne(io, task);
+                return;
+            };
 
             if (!checkIntegrity(&task, piece_buffer)) {
-                std.debug.lockStdErr();
-                defer std.debug.unlockStdErr();
-                stderr.print("Piece {} failed integrity\n", .{task.index}) catch {};
+                log.warn("Piece {} failed integrity\n", .{task.index}) catch {};
                 try tasks.enqueueElem(task);
                 continue;
             }
@@ -331,34 +256,38 @@ pub const MetaInfo = struct {
             try client.sendHave(task.index);
 
             // Success: enqueue the result
-            try results.enqueueElem(PieceCompleted{
+            try results.putOne(io, PieceCompleted{
                 .index = task.index,
                 .buf = piece_buffer,
             });
+        } else |err| switch (err) {
+            error.Closed => return,
+            else => |e| return e,
         }
     }
 
     /// Checks if the downloaded piece in ´buf´ has the same
     /// hash as the ´task´.
-    fn checkIntegrity(task: *const PieceTask, buf: []const u8) bool {
-        var hash = Sha1.init(.{});
+    fn checkIntegrity(task: PieceTask, buf: []const u8) bool {
+        var hash: Sha1 = .init(.{});
         hash.update(buf);
         const result = hash.finalResult();
         return std.mem.eql(u8, &result, &task.hash);
     }
 
     fn downloadPiece(
+        io: Io,
         allocator: Allocator,
         client: *Client,
-        task: *const PieceTask,
+        task: PieceTask,
         buf: []u8, // will be filled with the downloaded piece
-    ) !bool {
+    ) !void {
         const MAX_BACKLOG: usize = 20; // requests pipeline length
         var downloaded: usize = 0;
         var requested: usize = 0;
         var backlog: usize = 0;
 
-        const deadline = std.time.nanoTimestamp() + std.time.ns_per_s * 30;
+        const deadline = std.Io.Timestamp.now(io, .real).nanoseconds + std.time.ns_per_s * 30;
         while (downloaded < task.length) {
             if (!client.choked) {
                 // request more blocks as long as pipeline is not full and we havent download all blocks
@@ -371,12 +300,13 @@ pub const MetaInfo = struct {
             }
 
             // if the piece is not downloaded in 30sec, abort
-            const now = std.time.nanoTimestamp();
-            if (now > deadline)
-                return false;
+            const now = Io.Timestamp.now(io, .real);
+            if (now.nanoseconds > deadline)
+                return error.Aborted;
 
             const msg = try Message.read(allocator, client.conn.reader());
             defer msg.deinit(allocator);
+
             switch (msg) {
                 .piece => |p| {
                     std.debug.assert(p.block.len + p.begin <= buf.len); // received more bytes than available in onepice
@@ -395,7 +325,6 @@ pub const MetaInfo = struct {
                 else => {},
             }
         }
-        return true;
     }
 
     /// calculate the piece length according to the index,
@@ -414,8 +343,8 @@ pub const MetaInfo = struct {
     }
 
     /// Prints meta info contents to stdout
-    pub fn printMetaInfo(self: *const @This()) !void {
-        try stdout.print(
+    pub fn printMetaInfo(self: *const @This(), out: *std.Io.Writer) !void {
+        try out.print(
             \\Tracker URL: {s}
             \\Torrent Name: {s}
             \\Length: {d}
@@ -431,43 +360,35 @@ pub const MetaInfo = struct {
             self.info.pieces.len,
             std.fmt.fmtIntSizeDec(@intCast(self.info.piece_length)),
         });
-        try self.printPieceHashes();
+        try self.printPieceHashes(out);
+        try out.flush();
     }
 
-    fn printPieceHashes(self: *const @This()) !void {
-        try stdout.print("Piece Hashes: \n", .{});
+    /// Does not flush
+    fn printPieceHashes(self: *const @This(), out: *std.Io.Writer) !void {
+        try out.print("Piece Hashes: \n", .{});
         for (self.info.pieces, 0..) |piece_hash, i| {
             const hex = std.fmt.fmtSliceHexLower(&piece_hash);
-            try stdout.print("{s}\n", .{hex});
+            try out.print("{s}\n", .{hex});
             if (i > 8) {
-                try stdout.print("...\n", .{});
+                try out.print("...\n", .{});
                 break;
             }
         }
     }
 };
 
-/// wrapper so it can be used by a thread (direct function pointer, not attached to an instance)
-fn downloadWorkerThreadFn(ctx: *Context) void {
-    ctx.meta.downloadWorker(ctx.allocator, ctx.peer, ctx.tasks, ctx.results) catch |err| {
-        std.debug.lockStdErr();
-        defer std.debug.unlockStdErr();
-        stderr.print("Error with worker thread. id: {any}, msg: {?}\n", .{ std.Thread.getCurrentId(), err }) catch {};
-    };
-}
-
 /// Parses the given torrent file and retreives its contents.
 /// Caller owns the returned memory. (call deinit())
-pub fn open(allocator: Allocator, path: []const u8) !MetaInfoManaged {
-    var file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        try stdout.print("Could not open file '{s}', error: {?}", .{ path, err });
-        return MetaInfoError.FileNotFound;
-    };
-    defer file.close();
-    const contents: []const u8 = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    const bencode = try Bencode.decodeBencode(allocator, contents);
+pub fn open(io: Io, gpa: Allocator, path: []const u8) !MetaInfoManaged {
+    const contents = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
+    errdefer gpa.free(contents);
+
+    const b = try bencode.decodeBencode(gpa, contents);
+    errdefer b.deinit();
+
     return .{
-        .meta = try MetaInfo.init(allocator, bencode),
+        .meta = try MetaInfo.init(gpa, bencode),
         .backing_buff = contents,
     };
 }

@@ -1,12 +1,10 @@
 const std = @import("std");
-const Peer = @import("Peer.zig");
-const MetaInfo = @import("Torrent.zig").MetaInfo;
+const Allocator = std.mem.Allocator;
+
 const Messages = @import("Messages.zig");
 const Message = Messages.Message;
-
-const stdout = std.io.getStdOut().writer();
-const stderr = std.io.getStdErr().writer();
-const Allocator = std.mem.Allocator;
+const MetaInfo = @import("Torrent.zig").MetaInfo;
+const Peer = @import("Peer.zig");
 
 pub const Client = struct {
     conn: std.net.Stream,
@@ -20,7 +18,7 @@ pub const Client = struct {
     /// Must call deinit().
     pub fn new(
         allocator: Allocator,
-        peer_ip: std.net.Ip4Address,
+        peer_ip: std.Io.net.Ip4Address,
         peer_id: [20]u8,
         meta: *const MetaInfo,
     ) !Client {
