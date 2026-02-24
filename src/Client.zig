@@ -76,6 +76,11 @@ pub const Client = struct {
         self.bitfield.bitfield[byte_index] |= (@as(u8, 1) << (7 - byte_offset));
     }
 
+    /// Flushes connection writer
+    pub fn flush(self: *Client) !void {
+        try self.conn_writer.interface.flush();
+    }
+
     pub fn sendRequest(self: *Client, index: u32, begin: u32, length: u32) !void {
         const rqst = Message{ .request = .{
             .begin = begin,

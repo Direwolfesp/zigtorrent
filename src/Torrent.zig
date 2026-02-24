@@ -186,7 +186,6 @@ pub const MetaInfo = struct {
         var pieces_downloaded: u64 = 0;
         while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
             const piece_res: PieceCompleted = try results_queue.getOne(io);
-            log.info("main thread got a completed piece", .{});
 
             const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
             const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
@@ -203,8 +202,8 @@ pub const MetaInfo = struct {
             });
         }
 
-        log.info("awaiting group", .{});
-        try worker_group.await(io);
+        // log.info("awaiting group", .{});
+        // try worker_group.await(io);
 
         // copy buffer into file
         var file = Io.Dir.cwd().createFile(io, ofile, .{}) catch |err| {
@@ -239,24 +238,22 @@ pub const MetaInfo = struct {
         tasks: *Io.Queue(PieceTask),
         results: *Io.Queue(PieceCompleted),
     ) !void {
-        var client = try Client.new(
-            io,
-            gpa,
-            peer,
-            Peer.ID,
-            self,
-        );
+        var client = try Client.new(io, gpa, peer, Peer.ID, self);
         defer client.deinit(io, gpa);
         log.debug("Created client ({})", .{client.peer});
 
         try client.sendUnchoke();
+        try client.flush();
         log.debug("Sent unchoke", .{});
         try client.sendInterested();
+        try client.flush();
         log.debug("Sent interested", .{});
 
         while (tasks.getOne(io)) |task| {
-            // if client doesnt have the piece, requeue it
+            log.debug("Got a task! #{}", .{task.index});
+
             if (!try client.hasPiece(task.index)) {
+                log.debug("Requeuing task #{}", .{task.index});
                 try tasks.putOne(io, task);
                 continue;
             }
@@ -264,6 +261,7 @@ pub const MetaInfo = struct {
             const piece_buffer = try gpa.alloc(u8, task.length);
             errdefer gpa.free(piece_buffer);
 
+            log.debug("Downloading piece #{}", .{task.index});
             downloadPiece(io, gpa, &client, task, piece_buffer) catch {
                 log.err("Exiting", .{});
                 try tasks.putOne(io, task);
@@ -304,7 +302,7 @@ pub const MetaInfo = struct {
         var requested: usize = 0;
         var backlog: usize = 0;
 
-        const deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + std.time.ns_per_s * 30;
+        const deadline = std.Io.Timestamp.now(io, .real).nanoseconds + std.time.ns_per_s * 30;
         while (downloaded < task.length) {
             if (!client.choked) {
                 // request more blocks as long as pipeline is not full and we havent download all blocks
@@ -314,10 +312,11 @@ pub const MetaInfo = struct {
                     requested += block_size;
                     backlog += 1;
                 }
+                try client.flush();
             }
 
             // if the piece is not downloaded in 30sec, abort
-            const now = Io.Timestamp.now(io, .awake);
+            const now = Io.Timestamp.now(io, .real);
             if (now.nanoseconds > deadline)
                 return error.Aborted;
 
@@ -326,7 +325,8 @@ pub const MetaInfo = struct {
 
             switch (msg) {
                 .piece => |p| {
-                    std.debug.assert(p.block.len + p.begin <= buf.len); // received more bytes than available in onepice
+                    // received more bytes than available in onepice
+                    std.debug.assert(p.block.len + p.begin <= buf.len);
                     // NOTE: blocks may not be received in order
                     const copied = p.block.len;
                     const offset = p.begin;
