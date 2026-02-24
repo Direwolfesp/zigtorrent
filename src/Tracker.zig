@@ -19,13 +19,25 @@ pub const RequestParams = struct {
     left: i64 = undefined,
     compact: u8 = 1,
 
-    /// Construct query params in encoded URI
-    pub fn toURI(self: *const @This(), gpa: Allocator, query: *std.ArrayList(u8)) !std.Uri {
-        const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
-        const info_hash = try std.fmt.allocPrint(gpa, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
-        defer gpa.free(info_hash);
+    /// constructs a request based on metainfo
+    fn init(meta: *const MetaInfo) RequestParams {
+        return RequestParams{
+            .info_hash = meta.info_hash,
+            .left = meta.info.length,
+            .announce = meta.announce,
+        };
+    }
 
-        const url = try std.fmt.allocPrint(gpa, "{s}?" ++
+    /// Construct query params in encoded URI
+    /// buf should be big enough to hold >= 512 Bytes aprox
+    pub fn toUri(self: *const RequestParams, buf: []u8) !std.Uri {
+        const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
+        const info_hash = try std.fmt.bufPrint(buf, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
+
+        const peer_id_comp = std.Uri.Component{ .raw = self.peer_id };
+        const peer_id = try std.fmt.bufPrint(buf, "{f}", .{std.fmt.alt(peer_id_comp, .formatEscaped)});
+
+        const url = try std.fmt.bufPrint(buf, "{s}?" ++
             "info_hash={s}" ++
             "&peer_id={s}" ++
             "&port={d}" ++
@@ -35,47 +47,32 @@ pub const RequestParams = struct {
             "&compact={d}", .{
             self.announce,
             info_hash,
-            self.peer_id,
+            peer_id,
             self.port,
             self.uploaded,
             self.downloaded,
             self.left,
             self.compact,
         });
-        defer gpa.free(url);
-
-        try query.appendSlice(gpa, url);
-
         return try std.Uri.parse(url);
     }
 };
-
-/// constructs a request based on metainfo
-fn createRequest(meta: *const MetaInfo) RequestParams {
-    return RequestParams{
-        .info_hash = meta.info_hash,
-        .left = meta.info.length,
-        .announce = meta.announce,
-    };
-}
 
 /// Makes a request to the tracker listed in the metainfo
 /// and returns the `Bencode.ValueManaged` response.
 /// -> `meta` is the MetaInfo struct from the file
 /// -> `allocator` caller owns the returned memory.
 fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
-    var req_params = createRequest(meta);
-    var queryBuf: std.ArrayList(u8) = .empty;
-    defer queryBuf.deinit(gpa);
-    const uri: std.Uri = try req_params.toURI(gpa, &queryBuf);
-
-    // create client
     var client = std.http.Client{ .allocator = gpa, .io = io };
     defer client.deinit();
 
     var res_alloc: std.Io.Writer.Allocating = try .initCapacity(gpa, 1000);
     defer res_alloc.deinit();
     const res_writer: *std.Io.Writer = &res_alloc.writer;
+
+    var req_params: RequestParams = .init(meta);
+    var uri_buf: [512]u8 = undefined;
+    const uri: std.Uri = try req_params.toUri(&uri_buf);
 
     var res = client.fetch(.{
         .method = .GET,
@@ -101,6 +98,11 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
 pub fn getPeersFromResponse(io: Io, gpa: std.mem.Allocator, meta: *const MetaInfo) ![]Ip4Address {
     var response = try getResponse(io, gpa, meta);
     defer response.deinit(gpa);
+
+    if (response.dict.get("failure reason")) |f| {
+        log.err("tracker failure: {s}", .{f.string});
+        return error.TrackerFailure;
+    }
 
     const peer: bencode.Value = response.dict.get("peers") orelse
         return error.PeersNotFound;

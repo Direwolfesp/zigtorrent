@@ -54,6 +54,8 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *const Client, io: Io, gpa: Allocator) void {
+        gpa.free(self.read_buf);
+        gpa.free(self.write_buf);
         self.conn.close(io);
         self.bitfield.deinit(gpa);
     }
