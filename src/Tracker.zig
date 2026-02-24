@@ -31,29 +31,25 @@ pub const RequestParams = struct {
     /// Construct query params in encoded URI
     /// buf should be big enough to hold >= 512 Bytes aprox
     pub fn toUri(self: *const RequestParams, buf: []u8) !std.Uri {
-        const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
-        const info_hash = try std.fmt.bufPrint(buf, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
-
-        const peer_id_comp = std.Uri.Component{ .raw = self.peer_id };
-        const peer_id = try std.fmt.bufPrint(buf, "{f}", .{std.fmt.alt(peer_id_comp, .formatEscaped)});
+        const hash = std.Uri.Component{ .raw = &self.info_hash };
+        const peer_id = std.Uri.Component{ .raw = self.peer_id };
 
         const url = try std.fmt.bufPrint(buf, "{s}?" ++
-            "info_hash={s}" ++
-            "&peer_id={s}" ++
-            "&port={d}" ++
-            "&uploaded={d}" ++
-            "&downloaded={d}" ++
-            "&left={d}" ++
+            "info_hash={f}" ++ "&peer_id={f}" ++
+            "&port={d}" ++ "&uploaded={d}" ++
+            "&downloaded={d}" ++ "&left={d}" ++
             "&compact={d}", .{
             self.announce,
-            info_hash,
-            peer_id,
+            std.fmt.alt(hash, .formatEscaped),
+            std.fmt.alt(peer_id, .formatEscaped),
             self.port,
             self.uploaded,
             self.downloaded,
             self.left,
             self.compact,
         });
+
+        log.debug("sending: {s}", .{url});
         return try std.Uri.parse(url);
     }
 };
@@ -89,7 +85,7 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
     }
 
     std.debug.assert(res_writer.buffered().len != 0);
-    const body = try bencode.decodeBencode(gpa, res_writer.buffered());
+    const body = try bencode.decodeBencode(gpa, res_alloc.written());
     return body;
 }
 
@@ -99,10 +95,13 @@ pub fn getPeersFromResponse(io: Io, gpa: std.mem.Allocator, meta: *const MetaInf
     var response = try getResponse(io, gpa, meta);
     defer response.deinit(gpa);
 
-    if (response.dict.get("failure reason")) |f| {
-        log.err("tracker failure: {s}", .{f.string});
-        return error.TrackerFailure;
-    }
+    if (response.dict.get("failure reason")) |f| switch (f) {
+        .string => |str| {
+            log.err("tracker failure: {s}", .{str});
+            return error.TrackerFailure;
+        },
+        else => {},
+    };
 
     const peer: bencode.Value = response.dict.get("peers") orelse
         return error.PeersNotFound;
