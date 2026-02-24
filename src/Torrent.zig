@@ -74,7 +74,7 @@ pub const MetaInfo = struct {
     /// Not meant to be called directly.
     /// The allocator should hold the backing buffer of the `value`
     /// thus the need to call deinit
-    fn init(allocator: Allocator, value: bencode.Value) !MetaInfo {
+    fn init(gpa: Allocator, value: bencode.Value) !MetaInfo {
         if (value != .dict) return MetaInfoError.WrongType;
         const metaDict = value.dict;
 
@@ -87,12 +87,12 @@ pub const MetaInfo = struct {
         if (info != .dict) return MetaInfoError.WrongType;
         const infoDict = info.dict;
 
-        var string = std.ArrayList(u8).init(allocator);
+        var string: Io.Writer.Allocating = .init(gpa);
         defer string.deinit();
 
-        try info.encodeBencode(&string);
+        try info.encodeBencode(&string.writer);
         var sha1 = Sha1.init(.{});
-        sha1.update(string.items);
+        sha1.update(string.writer.buffer);
 
         // length
         const length = infoDict.get("length") orelse return MetaInfoError.NotSingleFile;
@@ -108,7 +108,7 @@ pub const MetaInfo = struct {
             return MetaInfoError.WrongType;
 
         const num_pieces: usize = pieces.string.len / 20;
-        const tmp_piece_hashes: [][20]u8 = try allocator.alloc([20]u8, num_pieces);
+        const tmp_piece_hashes: [][20]u8 = try gpa.alloc([20]u8, num_pieces);
         for (tmp_piece_hashes, 0..) |*hash, i| {
             hash.* = pieces.string[i * 20 .. i * 20 + 20][0..20].*;
         }
@@ -145,8 +145,12 @@ pub const MetaInfo = struct {
     pub fn download(self: *MetaInfo, io: Io, allocator: Allocator, ofile: []const u8) !bool {
         log.info("Starting download for {s}", .{self.info.name});
 
-        const peers = try Tracker.getPeersFromResponse(allocator, self);
+        const peers = try Tracker.getPeersFromResponse(io, allocator, self);
         defer allocator.free(peers);
+
+        var results_buf: [0x4000]u8 = undefined;
+        var results_queue: Io.Queue(PieceCompleted) = .init(&results_buf);
+        defer results_queue.close(io);
 
         var tasks_buf: [0x4000]u8 = undefined;
         var tasks_queue: Io.Queue(PieceTask) = .init(&tasks_buf);
@@ -156,27 +160,16 @@ pub const MetaInfo = struct {
         const producer_task = try io.concurrent(fillTasks, .{ self, io, &tasks_queue });
         defer producer_task.cancel(io) catch {};
 
-        var results_buf: [0x4000]u8 = undefined;
-        var results_queue: Io.Queue(PieceCompleted) = .init(&results_buf);
-        defer results_queue.close(io);
+        // FIXME: Is a std.Io.Group what I need??
+        var worker_group: Io.Group = .init;
+        defer worker_group.cancel(io);
 
         for (peers) |p| {
-            try io.concurrent(downloadWorker, .{ self, io, allocator, p, &tasks_queue, &results_queue });
+            try worker_group.concurrent(downloadWorker, .{
+                self,         io,             allocator, p,
+                &tasks_queue, &results_queue,
+            });
         }
-
-        // Spawn workers
-        // for (0..num_workers) |_| {
-        //     const peer = peers[std.crypto.random.intRangeAtMost(usize, 0, peers.len - 1)];
-        //     const ctx: *Context = try allocator.create(Context);
-
-        //     ctx.* = .{
-        //         .meta = self,
-        //         .allocator = allocator,
-        //         .peer = peer,
-        //         .tasks = &tasks,
-        //         .results = &res,
-        //     };
-        // }
 
         // copy the results into a buffer
         var downloaded_content: []u8 = try allocator.alloc(u8, @intCast(self.info.length));
@@ -384,11 +377,11 @@ pub fn open(io: Io, gpa: Allocator, path: []const u8) !MetaInfoManaged {
     const contents = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
     errdefer gpa.free(contents);
 
-    const b = try bencode.decodeBencode(gpa, contents);
-    errdefer b.deinit();
+    var b: bencode.Value = try bencode.decodeBencode(gpa, contents);
+    errdefer b.deinit(gpa);
 
     return .{
-        .meta = try MetaInfo.init(gpa, bencode),
+        .meta = try MetaInfo.init(gpa, b),
         .backing_buff = contents,
     };
 }

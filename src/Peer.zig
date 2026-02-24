@@ -6,12 +6,9 @@ const activeTag = std.meta.activeTag;
 const intToEnum = std.meta.intToEnum;
 const readInt = std.mem.readInt;
 
+const Bencode = @import("bencode.zig");
 const Torrent = @import("Torrent.zig");
-const Bencode = @import("Bencode.zig");
 const MetaInfo = Torrent.MetaInfo;
-
-const stdout = std.io.getStdOut().writer();
-const stderr = std.io.getStdErr().writer();
 
 //-----------------------------------------------------------------------------
 // BitTorrent Peer Messaging:
@@ -37,7 +34,7 @@ pub const HandShake = extern struct {
 };
 
 /// Connects to the given peer and returns the net.Stream
-pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !std.net.Stream {
+pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !std.Io.net.Stream {
     var conn = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer_ip });
     const hndshk = HandShake.create(peer_id, meta);
     try conn.writer().writeStruct(hndshk);
@@ -53,7 +50,7 @@ pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const 
 }
 
 /// Parses peers from a torrent in dictionary form and returns the ips
-pub fn parsePeersDict(allocator: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]std.net.Ip4Address {
+pub fn parsePeersDict(allocator: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]std.Io.net.Ip4Address {
     var peers = std.ArrayList(std.net.Ip4Address).init(allocator);
     defer peers.deinit();
     try peers.ensureTotalCapacityPrecise(data.items.len);
@@ -73,11 +70,14 @@ pub fn parsePeersDict(allocator: Allocator, data: *const std.ArrayList(Bencode.V
 }
 
 /// Parses peers from a torrent in binary form and returns the ips
-pub fn parsePeersBinary(allocator: Allocator, data: []const u8) ![]std.net.Ip4Address {
+pub fn parsePeersBinary(gpa: Allocator, data: []const u8) ![]std.Io.net.Ip4Address {
     // Each address is 6 bytes.
-    if (data.len % 6 != 0) return error.InvalidPeers;
-    var peers = std.ArrayList(std.net.Ip4Address).init(allocator);
-    defer peers.deinit();
+    if (data.len % 6 != 0)
+        return error.InvalidPeers;
+
+    var peers: std.ArrayList(std.Io.net.Ip4Address) = .empty;
+    defer peers.deinit(gpa);
+
     try peers.ensureTotalCapacityPrecise(data.len / 6);
 
     var i: usize = 0;

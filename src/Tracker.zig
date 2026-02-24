@@ -1,12 +1,13 @@
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const Ip4Address = std.net.Ip4Address;
-const stdout = std.io.getStdOut().writer();
-const stderr = std.io.getStdErr().writer();
+const Ip4Address = std.Io.net.Ip4Address;
 
-const Bencode = @import("Bencode.zig");
+const bencode = @import("bencode.zig");
 const MetaInfo = @import("Torrent.zig").MetaInfo;
 const Peer = @import("Peer.zig");
+
+const log = std.log.scoped(.tracker);
 
 pub const RequestParams = struct {
     announce: []const u8 = undefined,
@@ -19,11 +20,12 @@ pub const RequestParams = struct {
     compact: u8 = 1,
 
     /// Construct query params in encoded URI
-    pub fn toURI(self: *const @This(), query: *std.ArrayList(u8), allocator: Allocator) !std.Uri {
-        const hsh = try std.fmt.allocPrint(allocator, "{%}", .{std.Uri.Component{ .raw = &self.info_hash }});
-        defer allocator.free(hsh);
+    pub fn toURI(self: *const @This(), gpa: Allocator, query: *std.ArrayList(u8)) !std.Uri {
+        const hash_comp = std.Uri.Component{ .raw = &self.info_hash };
+        const info_hash = try std.fmt.allocPrint(gpa, "{f}", .{std.fmt.alt(hash_comp, .formatEscaped)});
+        defer gpa.free(info_hash);
 
-        const url = try std.fmt.allocPrint(allocator, "{s}?" ++
+        const url = try std.fmt.allocPrint(gpa, "{s}?" ++
             "info_hash={s}" ++
             "&peer_id={s}" ++
             "&port={d}" ++
@@ -32,7 +34,7 @@ pub const RequestParams = struct {
             "&left={d}" ++
             "&compact={d}", .{
             self.announce,
-            hsh,
+            info_hash,
             self.peer_id,
             self.port,
             self.uploaded,
@@ -40,10 +42,11 @@ pub const RequestParams = struct {
             self.left,
             self.compact,
         });
-        defer allocator.free(url);
-        try query.appendSlice(url);
+        defer gpa.free(url);
 
-        return try std.Uri.parse(try query.toOwnedSlice());
+        try query.appendSlice(gpa, url);
+
+        return try std.Uri.parse(url);
     }
 };
 
@@ -60,67 +63,51 @@ fn createRequest(meta: *const MetaInfo) RequestParams {
 /// and returns the `Bencode.ValueManaged` response.
 /// -> `meta` is the MetaInfo struct from the file
 /// -> `allocator` caller owns the returned memory.
-fn getResponse(allocator: std.mem.Allocator, meta: *const MetaInfo) !Bencode.ValueManaged {
-    // MetaInfo -> RequestParams -> Response
-
-    // request Params and create URI
+fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
     var req_params = createRequest(meta);
-    var queryBuf = std.ArrayList(u8).init(allocator);
-    defer queryBuf.deinit();
-    const uri: std.Uri = try req_params.toURI(&queryBuf, allocator);
+    var queryBuf: std.ArrayList(u8) = .empty;
+    defer queryBuf.deinit(gpa);
+    const uri: std.Uri = try req_params.toURI(gpa, &queryBuf);
 
     // create client
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{ .allocator = gpa, .io = io };
     defer client.deinit();
 
-    // header buffer
-    const server_header_buff: []u8 = try allocator.alloc(u8, 1024);
-    defer allocator.free(server_header_buff);
+    var res_alloc: std.Io.Writer.Allocating = try .initCapacity(gpa, 1000);
+    defer res_alloc.deinit();
+    const res_writer: *std.Io.Writer = &res_alloc.writer;
 
-    var req: std.http.Client.Request = try client.open(
-        .GET,
-        uri,
-        .{ .server_header_buffer = server_header_buff },
-    );
-    defer req.deinit();
+    var res = client.fetch(.{
+        .method = .GET,
+        .location = .{ .uri = uri },
+        .response_writer = res_writer,
+    }) catch |err| {
+        log.err("Could not stablish a connection with the tracker. Error: {t}", .{err});
+        return error.NetworkFailure;
+    };
 
-    // make request
-    try req.send();
-    try req.finish();
-    try stdout.print("tracker response: ⏳️", .{});
-    try req.wait();
-    if (req.response.status != .ok)
-        return error.RequestFailed;
-
-    try stdout.print("\rtracker response: ✔️\n", .{});
-
-    // read the bencoded response body
-    const body: []u8 = try req.reader().readAllAlloc(allocator, std.math.maxInt(usize));
-    const response: Bencode.Value = try Bencode.decodeBencode(allocator, body);
-
-    if (response.dict.get("failure reason")) |failure| {
-        try stderr.print("Failed to connect to tracker, Error: {s}\n", .{failure.string});
-        return error.TrackerError;
+    if (res.status != .ok) {
+        log.err("Tracker response error: {t}", .{res.status});
+        return error.NetworkFailure;
     }
 
-    return .{
-        .backing_buffer = body,
-        .value = response,
-    };
+    std.debug.assert(res_writer.buffered().len != 0);
+    const body = try bencode.decodeBencode(gpa, res_writer.buffered());
+    return body;
 }
 
 /// Parses the peer ips from the response of the tracker.
 /// Caller owns the returned memory.
-pub fn getPeersFromResponse(allocator: std.mem.Allocator, meta: *const MetaInfo) ![]Ip4Address {
-    var resp_managed = try getResponse(allocator, meta);
-    defer resp_managed.deinit(allocator);
+pub fn getPeersFromResponse(io: Io, gpa: std.mem.Allocator, meta: *const MetaInfo) ![]Ip4Address {
+    var response = try getResponse(io, gpa, meta);
+    defer response.deinit(gpa);
 
-    const peer: Bencode.Value = resp_managed.value.dict.get("peers") orelse
+    const peer: bencode.Value = response.dict.get("peers") orelse
         return error.PeersNotFound;
 
     return switch (peer) {
-        .string => |str| try Peer.parsePeersBinary(allocator, str),
-        .list => |list| try Peer.parsePeersDict(allocator, &list),
+        .string => |str| try Peer.parsePeersBinary(gpa, str),
+        .list => |list| try Peer.parsePeersDict(gpa, &list),
         else => error.InvalidPeers,
     };
 }
