@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
@@ -34,8 +36,14 @@ pub const HandShake = extern struct {
 };
 
 /// Connects to the given peer and returns the net.Stream
-pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !std.Io.net.Stream {
-    var conn = try std.net.tcpConnectToAddress(std.net.Address{ .in = peer_ip });
+pub fn connectToPeer(io: Io, peer_ip: net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !net.Stream {
+    var conn = try net.IpAddress.connect(.{ .ip4 = peer_ip }, io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+        .timeout = .none,
+    });
+    errdefer conn.close(io);
+
     const hndshk = HandShake.create(peer_id, meta);
     try conn.writer().writeStruct(hndshk);
     const resp_handshake = try conn.reader().readStruct(HandShake);
@@ -50,8 +58,8 @@ pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const 
 }
 
 /// Parses peers from a torrent in dictionary form and returns the ips
-pub fn parsePeersDict(gpa: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]std.Io.net.Ip4Address {
-    var peers: std.ArrayList(std.Io.net.Ip4Address) = .empty;
+pub fn parsePeersDict(gpa: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]net.Ip4Address {
+    var peers: std.ArrayList(net.Ip4Address) = .empty;
     defer peers.deinit(gpa);
 
     try peers.ensureTotalCapacityPrecise(gpa, data.items.len);
@@ -60,7 +68,7 @@ pub fn parsePeersDict(gpa: Allocator, data: *const std.ArrayList(Bencode.Value))
         .dict => |dict| {
             const ip = dict.get("ip") orelse return error.MissingIp;
             const port = dict.get("port") orelse return error.MissingPort;
-            const addr = std.Io.net.Ip4Address.parse(ip.string, @intCast(port.integer)) catch
+            const addr = net.Ip4Address.parse(ip.string, @intCast(port.integer)) catch
                 return error.InvalidIpFormat;
             peers.appendAssumeCapacity(addr);
         },
@@ -71,12 +79,12 @@ pub fn parsePeersDict(gpa: Allocator, data: *const std.ArrayList(Bencode.Value))
 }
 
 /// Parses peers from a torrent in binary form and returns the ips
-pub fn parsePeersBinary(gpa: Allocator, data: []const u8) ![]std.Io.net.Ip4Address {
+pub fn parsePeersBinary(gpa: Allocator, data: []const u8) ![]net.Ip4Address {
     // Each address is 6 bytes.
     if (data.len % 6 != 0)
         return error.InvalidPeers;
 
-    var peers: std.ArrayList(std.Io.net.Ip4Address) = .empty;
+    var peers: std.ArrayList(net.Ip4Address) = .empty;
     defer peers.deinit(gpa);
 
     try peers.ensureTotalCapacityPrecise(gpa, data.len / 6);
@@ -85,7 +93,7 @@ pub fn parsePeersBinary(gpa: Allocator, data: []const u8) ![]std.Io.net.Ip4Addre
     while (i + 5 < data.len) : (i += 6) {
         const port: u16 = std.mem.readInt(u16, data[i + 4 .. i + 6][0..2], .big);
         const ip: [4]u8 = data[i .. i + 4][0..4].*;
-        const address = try std.Io.net.Ip4Address.parse(&ip, port);
+        const address = try net.Ip4Address.parse(&ip, port);
         peers.appendAssumeCapacity(address);
     }
     return try peers.toOwnedSlice(gpa);
