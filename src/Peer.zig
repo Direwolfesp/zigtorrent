@@ -45,7 +45,7 @@ pub fn connectToPeer(io: Io, peer_ip: net.Ip4Address, peer_id: [20]u8, meta: *co
     var conn_r = conn.reader(io, &r_buf);
 
     const hndshk: HandShake = .create(peer_id, meta);
-    try conn_wr.interface.writeStruct(hndshk);
+    try conn_wr.interface.writeStruct(hndshk, .big);
     try conn_wr.interface.flush();
 
     const resp_handshake = try conn_r.interface.takeStruct(HandShake, .big);

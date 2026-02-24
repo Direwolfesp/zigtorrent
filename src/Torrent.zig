@@ -67,8 +67,8 @@ pub const MetaInfo = struct {
         name: []const u8,
     };
 
-    pub fn deinit(self: *@This()) void {
-        self.values.deinit();
+    pub fn deinit(self: *@This(), gpa: Allocator) void {
+        self.values.deinit(gpa);
     }
 
     /// Not meant to be called directly.
@@ -157,7 +157,7 @@ pub const MetaInfo = struct {
         defer tasks_queue.close(io);
 
         // Fill in piece queue
-        const producer_task = try io.concurrent(fillTasks, .{ self, io, &tasks_queue });
+        var producer_task = try io.concurrent(fillTasks, .{ self, io, &tasks_queue });
         defer producer_task.cancel(io) catch {};
 
         // FIXME: Is a std.Io.Group what I need??
@@ -165,7 +165,7 @@ pub const MetaInfo = struct {
         defer worker_group.cancel(io);
 
         for (peers) |p| {
-            try worker_group.concurrent(io, downloadWorker, .{
+            try worker_group.concurrent(io, downloadWorkerWrapped, .{
                 self,         io,             allocator, p,
                 &tasks_queue, &results_queue,
             });
@@ -179,7 +179,7 @@ pub const MetaInfo = struct {
         // copy each PieceResult into the buffer
         var pieces_downloaded: u64 = 0;
         while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
-            const piece_res: PieceCompleted = results_queue.dequeueElem();
+            const piece_res: PieceCompleted = try results_queue.getOne(io);
 
             const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
             const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
@@ -196,17 +196,30 @@ pub const MetaInfo = struct {
             });
         }
 
+        try worker_group.await(io);
+
         // copy buffer into file
         var file = Io.Dir.cwd().createFile(io, ofile, .{}) catch |err| {
-            log.err("Could not create file '{s}', Err: '{?}'", .{ ofile, err });
+            log.err("Could not create file '{s}': {t}", .{ ofile, err });
             return false;
         };
         defer file.close(io);
 
         var file_buf: [0x4000]u8 = undefined;
         var wr = file.writer(io, &file_buf);
-        try wr.interface.writeAll(&downloaded_content);
+        try wr.interface.writeAll(downloaded_content);
         return true;
+    }
+
+    pub fn downloadWorkerWrapped(
+        self: *const MetaInfo,
+        io: Io,
+        gpa: Allocator,
+        peer: Io.net.Ip4Address,
+        tasks: *Io.Queue(PieceTask),
+        results: *Io.Queue(PieceCompleted),
+    ) error{Canceled}!void {
+        return downloadWorker(self, io, gpa, peer, tasks, results) catch return error.Canceled;
     }
 
     /// Pumps PieceTask's from `tasks` and dumps the PieceResult's in `results` queue
@@ -218,8 +231,14 @@ pub const MetaInfo = struct {
         tasks: *Io.Queue(PieceTask),
         results: *Io.Queue(PieceCompleted),
     ) !void {
-        var client = try Client.new(io, gpa, peer, Peer.ID, &self);
-        defer client.deinit(gpa);
+        var client = try Client.new(
+            io,
+            gpa,
+            peer,
+            Peer.ID,
+            self,
+        );
+        defer client.deinit(io, gpa);
 
         try client.sendUnchoke();
         try client.sendInterested();
@@ -240,9 +259,9 @@ pub const MetaInfo = struct {
                 return;
             };
 
-            if (!checkIntegrity(&task, piece_buffer)) {
-                log.warn("Piece {} failed integrity\n", .{task.index}) catch {};
-                try tasks.enqueueElem(task);
+            if (!checkIntegrity(task, piece_buffer)) {
+                log.warn("Piece {} failed integrity", .{task.index});
+                try tasks.putOne(io, task);
                 continue;
             }
 
@@ -280,7 +299,7 @@ pub const MetaInfo = struct {
         var requested: usize = 0;
         var backlog: usize = 0;
 
-        const deadline = std.Io.Timestamp.now(io, .real).nanoseconds + std.time.ns_per_s * 30;
+        const deadline = std.Io.Timestamp.now(io, .awake).nanoseconds + std.time.ns_per_s * 30;
         while (downloaded < task.length) {
             if (!client.choked) {
                 // request more blocks as long as pipeline is not full and we havent download all blocks
@@ -293,17 +312,16 @@ pub const MetaInfo = struct {
             }
 
             // if the piece is not downloaded in 30sec, abort
-            const now = Io.Timestamp.now(io, .real);
+            const now = Io.Timestamp.now(io, .awake);
             if (now.nanoseconds > deadline)
                 return error.Aborted;
 
-            const msg = try Message.read(allocator, client.conn.reader());
+            const msg = try Message.read(allocator, &client.conn_reader.interface);
             defer msg.deinit(allocator);
 
             switch (msg) {
                 .piece => |p| {
                     std.debug.assert(p.block.len + p.begin <= buf.len); // received more bytes than available in onepice
-
                     // NOTE: blocks may not be received in order
                     const copied = p.block.len;
                     const offset = p.begin;
@@ -392,8 +410,8 @@ pub const MetaInfoManaged = struct {
     meta: MetaInfo,
     backing_buff: []const u8,
 
-    pub fn deinit(self: *@This(), allocator: Allocator) void {
-        allocator.free(self.backing_buff);
-        self.meta.deinit();
+    pub fn deinit(self: *@This(), gpa: Allocator) void {
+        gpa.free(self.backing_buff);
+        self.meta.deinit(gpa);
     }
 };

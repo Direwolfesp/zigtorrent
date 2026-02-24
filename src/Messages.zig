@@ -57,13 +57,13 @@ pub const Message = union(enum) {
     /// Creates a message from a given `reader`.
     /// Caller owns the returned memory, must call deinit()
     /// Message memory layout: |`message_len`(4bytes)|`messageid`(1byte)|`payload`(any)|
-    pub fn read(allocator: Allocator, reader: anytype) !Self {
-        const len: u32 = try reader.readInt(u32, .big);
-        const msg_id: ?MessageID = if (len > 0) try reader.readEnum(MessageID, .big) else null;
+    pub fn read(allocator: Allocator, reader: *std.Io.Reader) !Self {
+        const len: u32 = try reader.takeInt(u32, .big);
+        const msg_id: ?MessageID = if (len > 0) try reader.takeEnum(MessageID, .big) else null;
         const payload: ?[]u8 = if (len > 1) try allocator.alloc(u8, len - 1) else null;
 
         // copy the payload into the buffer
-        if (payload) |p| try reader.readNoEof(p);
+        if (payload) |p| try reader.readSliceAll(p);
         defer if (payload) |p| allocator.free(p);
 
         return switch (len) {
@@ -136,7 +136,7 @@ pub const Message = union(enum) {
 
     /// Dumps the message to a designated writer
     /// using the accoding memory layout
-    pub fn write(self: Self, writer: anytype) !void {
+    pub fn write(self: Self, writer: *std.Io.Writer) !void {
         switch (self) {
             .keep_alive => {
                 try writer.writeInt(u32, 0, .big);
