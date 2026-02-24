@@ -87,12 +87,15 @@ pub const MetaInfo = struct {
         if (info != .dict) return MetaInfoError.WrongType;
         const infoDict = info.dict;
 
-        var string: Io.Writer.Allocating = .init(gpa);
-        defer string.deinit();
+        // info hash
+        var str_alloc: std.Io.Writer.Allocating = try .initCapacity(gpa, info.len());
+        defer str_alloc.deinit();
+        const str_writer = &str_alloc.writer;
+        try info.encodeBencode(str_writer);
 
-        try info.encodeBencode(&string.writer);
         var sha1 = Sha1.init(.{});
-        sha1.update(string.writer.buffer);
+        sha1.update(str_writer.buffer);
+        const info_hash = sha1.finalResult();
 
         // length
         const length = infoDict.get("length") orelse return MetaInfoError.NotSingleFile;
@@ -126,7 +129,7 @@ pub const MetaInfo = struct {
                 .length = length.integer,
                 .name = name.string,
             },
-            .info_hash = sha1.finalResult(),
+            .info_hash = info_hash,
         };
     }
 
@@ -147,6 +150,7 @@ pub const MetaInfo = struct {
 
         const peers = try Tracker.getPeersFromResponse(io, allocator, self);
         defer allocator.free(peers);
+        defer log.info("Parsed peers from tracker", .{});
 
         var results_buf: [1024]PieceCompleted = undefined;
         var results_queue: Io.Queue(PieceCompleted) = .init(&results_buf);
@@ -157,6 +161,7 @@ pub const MetaInfo = struct {
         defer tasks_queue.close(io);
 
         // Fill in piece queue
+        log.info("Spawning producers", .{});
         var producer_task = try io.concurrent(fillTasks, .{ self, io, &tasks_queue });
         defer producer_task.cancel(io) catch {};
 
@@ -164,6 +169,7 @@ pub const MetaInfo = struct {
         var worker_group: Io.Group = .init;
         defer worker_group.cancel(io);
 
+        log.info("Spawning consumers", .{});
         for (peers) |p| {
             try worker_group.concurrent(io, downloadWorkerWrapped, .{
                 self,         io,             allocator, p,
@@ -180,6 +186,7 @@ pub const MetaInfo = struct {
         var pieces_downloaded: u64 = 0;
         while (pieces_downloaded < self.info.pieces.len) : (pieces_downloaded += 1) {
             const piece_res: PieceCompleted = try results_queue.getOne(io);
+            log.info("main thread got a completed piece", .{});
 
             const start: usize = @as(usize, @intCast(piece_res.index)) * @as(usize, @intCast(self.info.piece_length));
             const end: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(try self.calculatePieceSize(piece_res.index)));
@@ -196,6 +203,7 @@ pub const MetaInfo = struct {
             });
         }
 
+        log.info("awaiting group", .{});
         try worker_group.await(io);
 
         // copy buffer into file
@@ -239,9 +247,12 @@ pub const MetaInfo = struct {
             self,
         );
         defer client.deinit(io, gpa);
+        log.debug("Created client ({})", .{client.peer});
 
         try client.sendUnchoke();
+        log.debug("Sent unchoke", .{});
         try client.sendInterested();
+        log.debug("Sent interested", .{});
 
         while (tasks.getOne(io)) |task| {
             // if client doesnt have the piece, requeue it
@@ -287,13 +298,7 @@ pub const MetaInfo = struct {
         return std.mem.eql(u8, &result, &task.hash);
     }
 
-    fn downloadPiece(
-        io: Io,
-        allocator: Allocator,
-        client: *Client,
-        task: PieceTask,
-        buf: []u8, // will be filled with the downloaded piece
-    ) !void {
+    fn downloadPiece(io: Io, allocator: Allocator, client: *Client, task: PieceTask, buf: []u8) !void {
         const MAX_BACKLOG: usize = 20; // requests pipeline length
         var downloaded: usize = 0;
         var requested: usize = 0;
@@ -358,18 +363,18 @@ pub const MetaInfo = struct {
         try out.print(
             \\Tracker URL: {s}
             \\Torrent Name: {s}
-            \\Length: {d}
-            \\Info Hash: {s}
+            \\Length: {B}
+            \\Info Hash: {x}
             \\Total pieces: {d}
-            \\Piece Length: {d}
+            \\Piece Length: {B}
             \\
         , .{
             self.announce,
             self.info.name,
-            std.fmt.fmtIntSizeDec(@intCast(self.info.length)),
-            std.fmt.fmtSliceHexLower(&self.info_hash),
+            @as(u64, @intCast(self.info.length)),
+            self.info_hash,
             self.info.pieces.len,
-            std.fmt.fmtIntSizeDec(@intCast(self.info.piece_length)),
+            @as(u64, @intCast(self.info.piece_length)),
         });
         try self.printPieceHashes(out);
         try out.flush();
@@ -379,8 +384,7 @@ pub const MetaInfo = struct {
     fn printPieceHashes(self: *const @This(), out: *std.Io.Writer) !void {
         try out.print("Piece Hashes: \n", .{});
         for (self.info.pieces, 0..) |piece_hash, i| {
-            const hex = std.fmt.fmtSliceHexLower(&piece_hash);
-            try out.print("{s}\n", .{hex});
+            try out.print("{x}\n", .{piece_hash});
             if (i > 8) {
                 try out.print("...\n", .{});
                 break;

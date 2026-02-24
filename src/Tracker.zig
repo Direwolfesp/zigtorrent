@@ -34,8 +34,6 @@ pub const RequestParams = struct {
         const hash = std.Uri.Component{ .raw = &self.info_hash };
         const peer_id = std.Uri.Component{ .raw = self.peer_id };
 
-        log.debug("info hash: {x}", .{self.info_hash});
-
         const url = try std.fmt.bufPrint(buf, "{s}?" ++
             "info_hash={f}" ++ "&peer_id={f}" ++
             "&port={d}" ++ "&uploaded={d}" ++
@@ -51,16 +49,14 @@ pub const RequestParams = struct {
             self.compact,
         });
 
-        log.debug("sending: {s}", .{url});
         return try std.Uri.parse(url);
     }
 };
 
 /// Makes a request to the tracker listed in the metainfo
-/// and returns the `Bencode.ValueManaged` response.
-/// -> `meta` is the MetaInfo struct from the file
-/// -> `allocator` caller owns the returned memory.
-fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
+/// and returns the bencode response.
+/// Caller owns the returned memory.
+fn getAnnounce(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
     var client = std.http.Client{ .allocator = gpa, .io = io };
     defer client.deinit();
 
@@ -70,6 +66,8 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
     var req_params: RequestParams = .init(meta);
     var uri_buf: [1024]u8 = undefined;
     const uri: std.Uri = try req_params.toUri(&uri_buf);
+
+    log.info("Contacting tracker", .{});
 
     var res = client.fetch(.{
         .method = .GET,
@@ -85,6 +83,7 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
         return error.NetworkFailure;
     }
 
+    log.info("Tracker response ok", .{});
     std.debug.assert(response_writer.written().len != 0);
     const body = try bencode.decodeBencode(gpa, response_writer.written());
     return body;
@@ -92,8 +91,8 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
 
 /// Parses the peer ips from the response of the tracker.
 /// Caller owns the returned memory.
-pub fn getPeersFromResponse(io: Io, gpa: std.mem.Allocator, meta: *const MetaInfo) ![]Ip4Address {
-    var response = try getResponse(io, gpa, meta);
+pub fn getPeersFromResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) ![]Ip4Address {
+    var response = try getAnnounce(io, gpa, meta);
     defer response.deinit(gpa);
 
     if (response.dict.get("failure reason")) |f| switch (f) {
@@ -110,6 +109,6 @@ pub fn getPeersFromResponse(io: Io, gpa: std.mem.Allocator, meta: *const MetaInf
     return switch (peer) {
         .string => |str| try Peer.parsePeersBinary(gpa, str),
         .list => |list| try Peer.parsePeersDict(gpa, &list),
-        else => error.InvalidPeers,
+        else => error.InvalidPeerFormat,
     };
 }

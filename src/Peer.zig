@@ -88,16 +88,16 @@ pub fn parsePeersBinary(gpa: Allocator, data: []const u8) ![]net.Ip4Address {
         return error.InvalidPeers;
 
     var peers: std.ArrayList(net.Ip4Address) = .empty;
-    defer peers.deinit(gpa);
+    errdefer peers.deinit(gpa);
 
     try peers.ensureTotalCapacityPrecise(gpa, data.len / 6);
 
     var i: usize = 0;
     while (i + 5 < data.len) : (i += 6) {
         const port: u16 = std.mem.readInt(u16, data[i + 4 .. i + 6][0..2], .big);
-        const ip: [4]u8 = data[i .. i + 4][0..4].*;
-        const address = try net.Ip4Address.parse(&ip, port);
+        const ip = data[i..][0..4];
+        const address = net.Ip4Address{ .bytes = ip.*, .port = port };
         peers.appendAssumeCapacity(address);
     }
-    return try peers.toOwnedSlice(gpa);
+    return peers.items;
 }
