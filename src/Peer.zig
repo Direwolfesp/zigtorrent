@@ -2,11 +2,6 @@ const std = @import("std");
 const Io = std.Io;
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
-const expectEqual = std.testing.expectEqual;
-const expectEqualSlices = std.testing.expectEqualSlices;
-const activeTag = std.meta.activeTag;
-const intToEnum = std.meta.intToEnum;
-const readInt = std.mem.readInt;
 
 const Bencode = @import("bencode.zig");
 const Torrent = @import("Torrent.zig");
@@ -20,7 +15,6 @@ const MetaInfo = Torrent.MetaInfo;
 pub const ID = "-ZIG666-weoiuv8324ns".*;
 
 pub const HandShake = extern struct {
-    // layout matters
     pstrlen: u8 align(1) = 19,
     pstr: [19]u8 align(1) = "BitTorrent protocol".*,
     reserved: [8]u8 align(1) = std.mem.zeroes([8]u8),
@@ -44,9 +38,17 @@ pub fn connectToPeer(io: Io, peer_ip: net.Ip4Address, peer_id: [20]u8, meta: *co
     });
     errdefer conn.close(io);
 
-    const hndshk = HandShake.create(peer_id, meta);
-    try conn.writer().writeStruct(hndshk);
-    const resp_handshake = try conn.reader().readStruct(HandShake);
+    var wr_buf: [512]u8 = undefined;
+    var conn_wr = conn.writer(io, &wr_buf);
+
+    var r_buf: [512]u8 = undefined;
+    var conn_r = conn.reader(io, &r_buf);
+
+    const hndshk: HandShake = .create(peer_id, meta);
+    try conn_wr.interface.writeStruct(hndshk);
+    try conn_wr.interface.flush();
+
+    const resp_handshake = try conn_r.interface.takeStruct(HandShake, .big);
 
     if (!std.mem.eql(u8, &resp_handshake.pstr, &hndshk.pstr) or
         resp_handshake.pstrlen != 19 or
@@ -54,6 +56,7 @@ pub fn connectToPeer(io: Io, peer_ip: net.Ip4Address, peer_id: [20]u8, meta: *co
     {
         return error.HandShakeError;
     }
+
     return conn;
 }
 
