@@ -68,6 +68,7 @@ pub const MetaInfo = struct {
     };
 
     pub fn deinit(self: *@This(), gpa: Allocator) void {
+        gpa.free(self.info.pieces);
         self.values.deinit(gpa);
     }
 
@@ -107,13 +108,14 @@ pub const MetaInfo = struct {
 
         // piece hashes
         const pieces = infoDict.get("pieces") orelse return MetaInfoError.MisingField;
-        if (pieces != .string)
-            return MetaInfoError.WrongType;
-
+        if (pieces != .string) return MetaInfoError.WrongType;
         const num_pieces: usize = pieces.string.len / 20;
+
         const tmp_piece_hashes: [][20]u8 = try gpa.alloc([20]u8, num_pieces);
+        errdefer gpa.free(tmp_piece_hashes);
+
         for (tmp_piece_hashes, 0..) |*hash, i| {
-            hash.* = pieces.string[i * 20 .. i * 20 + 20][0..20].*;
+            hash.* = pieces.string[i * 20 ..][0..20].*;
         }
 
         // name
@@ -201,9 +203,6 @@ pub const MetaInfo = struct {
                 self.info.pieces.len,
             });
         }
-
-        // log.info("awaiting group", .{});
-        // try worker_group.await(io);
 
         // copy buffer into file
         var file = Io.Dir.cwd().createFile(io, ofile, .{}) catch |err| {
