@@ -34,6 +34,8 @@ pub const RequestParams = struct {
         const hash = std.Uri.Component{ .raw = &self.info_hash };
         const peer_id = std.Uri.Component{ .raw = self.peer_id };
 
+        log.debug("info hash: {x}", .{self.info_hash});
+
         const url = try std.fmt.bufPrint(buf, "{s}?" ++
             "info_hash={f}" ++ "&peer_id={f}" ++
             "&port={d}" ++ "&uploaded={d}" ++
@@ -62,18 +64,17 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
     var client = std.http.Client{ .allocator = gpa, .io = io };
     defer client.deinit();
 
-    var res_alloc: std.Io.Writer.Allocating = try .initCapacity(gpa, 1000);
-    defer res_alloc.deinit();
-    const res_writer: *std.Io.Writer = &res_alloc.writer;
+    var response_writer: std.Io.Writer.Allocating = try .initCapacity(gpa, 1000);
+    defer response_writer.deinit();
 
     var req_params: RequestParams = .init(meta);
-    var uri_buf: [512]u8 = undefined;
+    var uri_buf: [1024]u8 = undefined;
     const uri: std.Uri = try req_params.toUri(&uri_buf);
 
     var res = client.fetch(.{
         .method = .GET,
         .location = .{ .uri = uri },
-        .response_writer = res_writer,
+        .response_writer = &response_writer.writer,
     }) catch |err| {
         log.err("Could not stablish a connection with the tracker. Error: {t}", .{err});
         return error.NetworkFailure;
@@ -84,8 +85,8 @@ fn getResponse(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
         return error.NetworkFailure;
     }
 
-    std.debug.assert(res_writer.buffered().len != 0);
-    const body = try bencode.decodeBencode(gpa, res_alloc.written());
+    std.debug.assert(response_writer.written().len != 0);
+    const body = try bencode.decodeBencode(gpa, response_writer.written());
     return body;
 }
 
