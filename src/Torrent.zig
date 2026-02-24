@@ -130,7 +130,7 @@ pub const MetaInfo = struct {
         };
     }
 
-    fn fillTasks(self: MetaInfo, io: Io, tasks: *Io.Queue(PieceTask)) !void {
+    fn fillTasks(self: *const MetaInfo, io: Io, tasks: *Io.Queue(PieceTask)) !void {
         for (self.info.pieces, 0..) |piece_hash, i| {
             try tasks.putOne(io, PieceTask{
                 .hash = piece_hash,
@@ -148,11 +148,11 @@ pub const MetaInfo = struct {
         const peers = try Tracker.getPeersFromResponse(io, allocator, self);
         defer allocator.free(peers);
 
-        var results_buf: [0x4000]u8 = undefined;
+        var results_buf: [1024]PieceCompleted = undefined;
         var results_queue: Io.Queue(PieceCompleted) = .init(&results_buf);
         defer results_queue.close(io);
 
-        var tasks_buf: [0x4000]u8 = undefined;
+        var tasks_buf: [1024]PieceTask = undefined;
         var tasks_queue: Io.Queue(PieceTask) = .init(&tasks_buf);
         defer tasks_queue.close(io);
 
@@ -165,7 +165,7 @@ pub const MetaInfo = struct {
         defer worker_group.cancel(io);
 
         for (peers) |p| {
-            try worker_group.concurrent(downloadWorker, .{
+            try worker_group.concurrent(io, downloadWorker, .{
                 self,         io,             allocator, p,
                 &tasks_queue, &results_queue,
             });
@@ -211,7 +211,7 @@ pub const MetaInfo = struct {
 
     /// Pumps PieceTask's from `tasks` and dumps the PieceResult's in `results` queue
     pub fn downloadWorker(
-        self: MetaInfo,
+        self: *const MetaInfo,
         io: Io,
         gpa: Allocator,
         peer: Io.net.Ip4Address,

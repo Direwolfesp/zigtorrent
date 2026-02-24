@@ -7,26 +7,21 @@ const MetaInfo = @import("Torrent.zig").MetaInfo;
 const Peer = @import("Peer.zig");
 
 pub const Client = struct {
-    conn: std.net.Stream,
+    conn: std.Io.net.Stream,
     choked: bool = true,
-    peer: std.net.Ip4Address,
+    peer: std.Io.net.Ip4Address,
     bitfield: Message = undefined,
     info_hash: [20]u8 = undefined,
     peerID: [20]u8 = undefined,
 
     /// Caller owns returned memory and resources.
     /// Must call deinit().
-    pub fn new(
-        allocator: Allocator,
-        peer_ip: std.Io.net.Ip4Address,
-        peer_id: [20]u8,
-        meta: *const MetaInfo,
-    ) !Client {
+    pub fn new(gpa: Allocator, peer_ip: std.Io.net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !Client {
         const conn = Peer.connectToPeer(peer_ip, peer_id, meta) catch
             return error.HandShakeFailed;
 
         // received bitfield
-        const bf: Message = try Message.read(allocator, conn.reader());
+        const bf: Message = try Message.read(gpa, conn.reader());
         if (bf != .bitfield) return error.ClientConnFailed;
 
         return .{

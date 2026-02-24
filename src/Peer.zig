@@ -50,23 +50,24 @@ pub fn connectToPeer(peer_ip: std.net.Ip4Address, peer_id: [20]u8, meta: *const 
 }
 
 /// Parses peers from a torrent in dictionary form and returns the ips
-pub fn parsePeersDict(allocator: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]std.Io.net.Ip4Address {
-    var peers = std.ArrayList(std.net.Ip4Address).init(allocator);
-    defer peers.deinit();
-    try peers.ensureTotalCapacityPrecise(data.items.len);
+pub fn parsePeersDict(gpa: Allocator, data: *const std.ArrayList(Bencode.Value)) ![]std.Io.net.Ip4Address {
+    var peers: std.ArrayList(std.Io.net.Ip4Address) = .empty;
+    defer peers.deinit(gpa);
 
-    for (data.items) |d| {
-        if (d != .dict) return error.ParsePeersDict;
+    try peers.ensureTotalCapacityPrecise(gpa, data.items.len);
 
-        const dict = &d.dict;
-        const addr = try std.net.Address.resolveIp(
-            dict.get("ip").?.string,
-            @intCast(dict.get("port").?.integer),
-        );
-        peers.appendAssumeCapacity(addr.in);
-    }
+    for (data.items) |d| switch (d) {
+        .dict => |dict| {
+            const ip = dict.get("ip") orelse return error.MissingIp;
+            const port = dict.get("port") orelse return error.MissingPort;
+            const addr = std.Io.net.Ip4Address.parse(ip.string, @intCast(port.integer)) catch
+                return error.InvalidIpFormat;
+            peers.appendAssumeCapacity(addr);
+        },
+        else => return error.ParsePeersDict,
+    };
 
-    return peers.toOwnedSlice();
+    return peers.items;
 }
 
 /// Parses peers from a torrent in binary form and returns the ips
@@ -78,14 +79,14 @@ pub fn parsePeersBinary(gpa: Allocator, data: []const u8) ![]std.Io.net.Ip4Addre
     var peers: std.ArrayList(std.Io.net.Ip4Address) = .empty;
     defer peers.deinit(gpa);
 
-    try peers.ensureTotalCapacityPrecise(data.len / 6);
+    try peers.ensureTotalCapacityPrecise(gpa, data.len / 6);
 
     var i: usize = 0;
     while (i + 5 < data.len) : (i += 6) {
         const port: u16 = std.mem.readInt(u16, data[i + 4 .. i + 6][0..2], .big);
         const ip: [4]u8 = data[i .. i + 4][0..4].*;
-        const address = std.net.Address.initIp4(ip, port);
-        peers.appendAssumeCapacity(address.in);
+        const address = try std.Io.net.Ip4Address.parse(&ip, port);
+        peers.appendAssumeCapacity(address);
     }
-    return peers.toOwnedSlice();
+    return try peers.toOwnedSlice(gpa);
 }
