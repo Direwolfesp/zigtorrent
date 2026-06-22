@@ -69,7 +69,7 @@ fn getAnnounce(io: Io, gpa: Allocator, meta: *const MetaInfo) !bencode.Value {
 
     log.info("Contacting tracker", .{});
 
-    var res = client.fetch(.{
+    const res = client.fetch(.{
         .method = .GET,
         .location = .{ .uri = uri },
         .response_writer = &response_writer.writer,

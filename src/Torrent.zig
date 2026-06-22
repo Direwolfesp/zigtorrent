@@ -47,7 +47,6 @@ const MetaInfoError = error{
 pub const MetaInfo = struct {
     /// not meant to be accessed directly, this just points to memory created by allocator
     values: bencode.Value,
-
     /// tracker url
     announce: []const u8 = undefined,
     /// info dictionary
@@ -173,7 +172,7 @@ pub const MetaInfo = struct {
 
         log.info("Spawning consumers", .{});
         for (peers) |p| {
-            try worker_group.concurrent(io, downloadWorkerWrapped, .{
+            worker_group.async(io, downloadWorkerWrapped, .{
                 self,         io,             allocator, p,
                 &tasks_queue, &results_queue,
             });
@@ -211,9 +210,7 @@ pub const MetaInfo = struct {
         };
         defer file.close(io);
 
-        var file_buf: [0x4000]u8 = undefined;
-        var wr = file.writer(io, &file_buf);
-        try wr.interface.writeAll(downloaded_content);
+        try file.writeStreamingAll(io, downloaded_content);
         return true;
     }
 
@@ -282,7 +279,7 @@ pub const MetaInfo = struct {
             });
         } else |err| switch (err) {
             error.Closed => return,
-            else => |e| return e,
+            error.Canceled => |e| return e,
         }
     }
 
@@ -315,7 +312,7 @@ pub const MetaInfo = struct {
             }
 
             // if the piece is not downloaded in 30sec, abort
-            const now = Io.Timestamp.now(io, .real);
+            const now: Io.Timestamp = .now(io, .real);
             if (now.nanoseconds > deadline)
                 return error.Aborted;
 
@@ -358,7 +355,7 @@ pub const MetaInfo = struct {
     }
 
     /// Prints meta info contents to stdout
-    pub fn printMetaInfo(self: *const @This(), out: *std.Io.Writer) !void {
+    pub fn printMetaInfo(self: *const @This(), out: *Io.Writer) !void {
         try out.print(
             \\Tracker URL: {s}
             \\Torrent Name: {s}

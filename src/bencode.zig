@@ -6,7 +6,7 @@ const log = std.log.scoped(.bencode);
 
 /// For sorting the key strings of the hash table
 const Ctx = struct {
-    map: std.StringArrayHashMap(Value),
+    map: StringMap(Value),
     pub fn lessThan(self: @This(), a: usize, b: usize) bool {
         return std.mem.order(u8, self.map.keys()[a], self.map.keys()[b])
             .compare(.lt);
@@ -22,15 +22,16 @@ pub const ParseError = error{
     InvalidIntegerFormat,
 } || std.fmt.ParseIntError || Allocator.Error;
 
+const StringMap = std.array_hash_map.String;
+
 pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
     list: std.ArrayList(Value),
-    dict: std.StringArrayHashMap(Value),
+    dict: StringMap(Value),
 
     /// Given a Value -> JSON string
-    /// TODO: refactor this
-    pub fn format(self: *const @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(self: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const nested = if (false) "\n" else "";
         var json = std.json.Stringify{ .writer = writer };
 
@@ -67,16 +68,15 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn deinit(self: *@This(), allocator: Allocator) void {
+    pub fn deinit(self: *Value, allocator: Allocator) void {
         switch (self.*) {
             .list => |*list| {
                 for (list.items) |*item| item.deinit(allocator);
                 list.deinit(allocator);
             },
-            .dict => |dict| {
+            .dict => |*dict| {
                 for (dict.values()) |*val| val.deinit(allocator);
-                var tmp = dict;
-                tmp.deinit();
+                dict.deinit(allocator);
             },
             else => {},
         }
@@ -180,8 +180,8 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) ParseError!
             return .{ .list = decodedList };
         },
         'd' => {
-            var decodedDict = std.StringArrayHashMap(Value).init(allocator);
-            errdefer decodedDict.deinit();
+            var decodedDict: StringMap(Value) = .empty;
+            errdefer decodedDict.deinit(allocator);
 
             var i: usize = 1;
             while (i < encodedValue.len and encodedValue[i] != 'e') {
@@ -189,7 +189,7 @@ pub fn decodeBencode(allocator: Allocator, encodedValue: []const u8) ParseError!
                 std.debug.assert(key == .string);
                 i += key.len();
                 const val = try decodeBencode(allocator, encodedValue[i..]);
-                try decodedDict.put(key.string, val);
+                try decodedDict.put(allocator, key.string, val);
                 i += val.len();
             }
             decodedDict.sort(Ctx{ .map = decodedDict });

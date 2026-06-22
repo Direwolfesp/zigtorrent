@@ -30,12 +30,14 @@ pub const HandShake = extern struct {
 };
 
 /// Connects to the given peer and returns the net.Stream
-pub fn connectToPeer(io: Io, peer_ip: net.Ip4Address, peer_id: [20]u8, meta: *const MetaInfo) !net.Stream {
-    var conn = try net.IpAddress.connect(.{ .ip4 = peer_ip }, io, .{
-        .mode = .stream,
-        .protocol = .tcp,
-        .timeout = .none,
-    });
+pub fn connectToPeer(
+    io: Io,
+    peer_ip: net.Ip4Address,
+    peer_id: [20]u8,
+    meta: *const MetaInfo,
+) !net.Stream {
+    const peer_addr: net.IpAddress = .{ .ip4 = peer_ip };
+    var conn = try peer_addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
     errdefer conn.close(io);
 
     var wr_buf: [512]u8 = undefined;
